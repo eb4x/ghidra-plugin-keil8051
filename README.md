@@ -6,6 +6,29 @@ Raw 8051 images carry no headers, no symbols and no entry points, and Keil's cod
 puts data in the middle of the instruction stream. Stock auto-analysis therefore produces
 almost nothing on them. This extension supplies the two pieces that get an image moving.
 
+## Loader
+
+`MStarModuleLoader` — **MStar 8051 multi-module flash image**. An MStar scaler image is a 1.26 MB
+flash dump, and the 8051 code in it is not one program: it is several self-contained modules of at
+most 64 KB, each addressed from `0x0000`, at arbitrary file offsets, separated by compressed
+resources, `0xff` gaps and an ARM blob. Flat it cannot be loaded at all — the modules would overlap
+in the 8051's single 16-bit code space. A module at a time it takes a hand calculation and a file
+split each.
+
+The loader finds the modules and creates one program per module, each with a single `rwx` `CODE`
+block based at `0x0000`, named from the image's own sBoot firmware ID (`EIM152_020080`). It offers
+itself only when it finds **two or more** modules; one module is Raw Binary's job.
+
+Detection is by **vector table**, because these images have no header: a reset `LJMP` at the
+module's first byte, plus at least three of the five interrupt vectors holding a jump or a `RETI`.
+That is a heuristic over headerless data and is meant to be overridden — the **Module offsets**
+option takes an explicit list (`0x20080,0x30080,0x108000`) and **Module size** the length.
+
+**A module without a vector table will not be found**, and that is not hypothetical: in the known
+image the USB-PD/DP-alt-mode payload at `0x108000` begins `MOV A,#5; MOVX @DPTR,A` and the one at
+`0x100000` begins with a Keil register-init prologue. Neither is a reset vector, so both need
+explicit offsets.
+
 ## Analyzers
 
 | analyzer | slot | what it does |

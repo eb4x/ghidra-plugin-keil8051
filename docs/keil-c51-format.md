@@ -291,9 +291,23 @@ MStar flash-remap/MIU registers (XDATA `0x38a` bit 7, `0x393` = `0x5f`, `0x3a6` 
 An earlier description of this image as "32 KiB common at `0x0000`-`0x7fff` plus a switched window
 at `0x8000`-`0xffff`" was wrong and has been retracted by its author. Do not build on it.
 
-### What would actually help
+### What was built instead: the module loader
 
-Import-time support for **one flash image containing several independent ≤64 KB 8051 images at
-arbitrary offsets** — pick offset and length, optionally a second copy — plus vector seeding at
-each module's own base. `Keil8051VectorAnalyzer` already handles the second half, because its
-offsets are relative to the image base rather than to absolute zero.
+`MStarModuleLoader` splits such an image into one program per module. Verified on
+`HP_Z27kG3_EIM153_15100_20220322_Service.bin`: it auto-detects exactly the two modules at
+`0x20080` and `0x30080`, names them `EIM152_020080` / `EIM152_030080` from the sBoot info block,
+gives each an `rwx` `CODE` block at `0x0000`, and each then analyses to 10 seeded vectors and 65
+functions — identical to a hand-split import, with no hand calculation.
+
+Two findings from doing it:
+
+- **The embedded firmware ID is `EIM152`, not `EIM153`.** The info block at `0x20000` holds the
+  build date `20220322` at `+0x70` and the 6-character ID at `+0x78`, and that ID reads `EIM152`
+  while the distributed file is named `..._EIM153_...`. The bytes are unambiguous.
+- **Neither `0x100000` nor `0x108000` begins with a vector table.** `0x108000` is
+  `74 05 f0` (`MOV A,#5; MOVX @DPTR,A`) and `0x100000` is `7b e1 7a 7a 79 94 78 3f`, a Keil
+  register-init prologue. So the USB-PD/DP-alt-mode module is a payload that is called, not reset
+  into, and the scan correctly refuses both. Loading it needs the explicit **Module offsets**
+  option. It also means that importing that region as a raw 64 KB slice and letting
+  `Keil8051VectorAnalyzer` seed "vectors" at `+0/+3/+0xb/...` seeds addresses that are not vectors
+  at all — the code it reaches from them may still be real, but the entry points are not.

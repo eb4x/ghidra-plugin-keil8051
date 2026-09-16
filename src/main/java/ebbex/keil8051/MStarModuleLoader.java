@@ -188,6 +188,9 @@ public class MStarModuleLoader extends AbstractProgramLoader {
 			block.setWrite(true);
 			block.setExecute(true);
 			block.setComment("8051 module from file offset 0x%x".formatted(module.offset()));
+			// Without this every module reports the whole image's file name as its program name,
+			// which makes several modules from one image indistinguishable in any listing of them.
+			program.setName(module.name());
 			log.appendMsg("%s: loaded 0x%x bytes from file offset 0x%x"
 				.formatted(module.name(), module.length(), module.offset()));
 			success = true;
