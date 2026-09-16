@@ -3,6 +3,7 @@ package ebbex.keil8051;
 import static org.junit.Assert.*;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 import org.junit.Before;
@@ -155,52 +156,102 @@ public class KeilJumpTableAnalyzerTest extends AbstractGenericTest {
 		}
 	}
 
+	/** Recovers, disassembles, creates a function and runs the override pass on a program. */
+	private static void recoverAndOverride(ProgramBuilder b, String entry, int length)
+			throws Exception {
+		Program p = b.getProgram();
+		int txId = p.startTransaction("recover");
+		try {
+			new KeilJumpTableAnalyzer().added(p, new AddressSet(), TaskMonitor.DUMMY,
+				new MessageLog());
+		}
+		finally {
+			p.endTransaction(txId, true);
+		}
+		b.disassemble(entry, length);
+		txId = p.startTransaction("function and override");
+		try {
+			new ghidra.app.cmd.function.CreateFunctionCmd("dispatch", b.addr(entry), null,
+				SourceType.ANALYSIS).applyTo(p, TaskMonitor.DUMMY);
+			new KeilSwitchOverrideAnalyzer().added(p, new AddressSet(), TaskMonitor.DUMMY,
+				new MessageLog());
+		}
+		finally {
+			p.endTransaction(txId, true);
+		}
+	}
+
+	private static boolean hasOverride(Program p, Address branch) {
+		SymbolTable symbols = p.getSymbolTable();
+		Namespace function = (Namespace) p.getFunctionManager().getFunctionContaining(branch);
+		Namespace overrides = symbols.getNamespace("override", function);
+		return overrides != null && symbols.getNamespace("jmp_" + branch, overrides) != null;
+	}
+
 	/**
-	 * The override is what actually silences the decompiler, so it is tested on a self-contained
-	 * dispatch whose flow closes — the real hub bytes reach code this fixture does not contain, and
-	 * without a function body around the branch there is nowhere for Ghidra to store an override.
+	 * The override mechanics, on the one shape that always needs them.
+	 * <p>
+	 * The page-carry shape ({@code JNC $+2; INC DPH} between {@code ADD A,ACC} and
+	 * {@code JMP @A+DPTR}) makes the table base a branch-dependent select, and no Ghidra — stock
+	 * or carrying the CJNE guard fix — recovers it ("too many branches"). So an override is
+	 * written whatever SDK this runs against, which is what makes this test deterministic.
 	 */
 	@Test
-	public void writesADecompilerOverrideSoTheDecompilerStopsGuessing() throws Exception {
-		ProgramBuilder self = new ProgramBuilder("selfcontained", ProgramBuilder._8051);
+	public void writesAnOverrideWhereTheDecompilerCannotRecoverTheTable() throws Exception {
+		ProgramBuilder self = new ProgramBuilder("pagecarry", ProgramBuilder._8051);
+		self.createMemory("CODE", "0x9000", 0x100);
+		// DEC A / CJNE A,#2 / JC / AJMP default / MOV DPTR,#0x9012 / ADD A,ACC / JNC $+2 /
+		// INC DPH / JMP @A+DPTR / two AJMP slots / RET bodies for both cases and the default
+		self.setBytes("0x9000",
+			"14 b4 02 00 40 02 01 17 90 90 12 25 e0 50 02 05 83 73 01 16 01 18 22 22 22");
+		recoverAndOverride(self, "0x9000", 18);
+
+		assertTrue("nothing recovers the page-carry shape, so the override must be written",
+			hasOverride(self.getProgram(), self.addr("0x9011")));
+	}
+
+	/**
+	 * The plain shape, tested so it holds against any SDK.
+	 * <p>
+	 * Whether this table needs an override depends on the Ghidra underneath: stock Ghidra does
+	 * not read {@code CJNE #n / JC} as a bound and fabricates cases, so an override is written;
+	 * a Ghidra carrying the guard fix recovers it and the analyzer stands aside, because an
+	 * override would render it worse. Which path is taken is not the point. The property is that
+	 * afterwards the decompiler recovers exactly this table.
+	 */
+	@Test
+	public void thePlainShapeEndsUpRecoveredExactlyWhicheverPathIsTaken() throws Exception {
+		ProgramBuilder self = new ProgramBuilder("plain", ProgramBuilder._8051);
 		self.createMemory("CODE", "0x9000", 0x100);
 		//     CJNE A,#2 / JC / AJMP default / MOV DPTR,#0x900d / ADD A,ACC / JMP @A+DPTR
 		//     then two AJMP entries, their RET bodies, and the default's RET.
 		self.setBytes("0x9000", "b4 02 00 40 02 01 15 90 90 0d 25 e0 73 01 11 01 13 22 00 22 00 22");
+		recoverAndOverride(self, "0x9000", 13);
+
 		Program tiny = self.getProgram();
-
-		int txId = tiny.startTransaction("recover and override");
+		Address branch = self.addr("0x900c");
+		ghidra.app.decompiler.DecompInterface decompiler =
+			new ghidra.app.decompiler.DecompInterface();
 		try {
-			assertTrue(new KeilJumpTableAnalyzer().added(tiny, new AddressSet(), TaskMonitor.DUMMY,
-				new MessageLog()));
+			assertTrue(decompiler.openProgram(tiny));
+			var results = decompiler.decompileFunction(
+				tiny.getFunctionManager().getFunctionContaining(branch), 30, TaskMonitor.DUMMY);
+			assertTrue(results.decompileCompleted());
+
+			ghidra.program.model.pcode.JumpTable recovered = null;
+			for (var table : results.getHighFunction().getJumpTables()) {
+				if (branch.equals(table.getSwitchAddress())) {
+					recovered = table;
+				}
+			}
+			assertNotNull("the decompiler must recover a table at the branch", recovered);
+			assertTrue("and it must be exactly this table, plus at most the default",
+				KeilSwitchOverrideAnalyzer.matchesTable(List.of(recovered.getCases()),
+					List.of(self.addr("0x900d"), self.addr("0x900f"))));
 		}
 		finally {
-			tiny.endTransaction(txId, true);
+			decompiler.dispose();
 		}
-		self.disassemble("0x9000", 13);
-		txId = tiny.startTransaction("function and override");
-		try {
-			new ghidra.app.cmd.function.CreateFunctionCmd("dispatch", self.addr("0x9000"), null,
-				SourceType.ANALYSIS).applyTo(tiny, TaskMonitor.DUMMY);
-			assertNotNull("precondition: the branch must sit inside a function",
-				tiny.getFunctionManager().getFunctionContaining(self.addr("0x900c")));
-
-			assertTrue("an override must be written for the recovered table",
-				new KeilSwitchOverrideAnalyzer().added(tiny, new AddressSet(), TaskMonitor.DUMMY,
-					new MessageLog()));
-		}
-		finally {
-			tiny.endTransaction(txId, true);
-		}
-
-		// Ghidra stores an override purely as symbols under <func>::override::jmp_<branch>.
-		SymbolTable symbols = tiny.getSymbolTable();
-		Namespace function = (Namespace) tiny.getFunctionManager()
-			.getFunctionContaining(self.addr("0x900c"));
-		Namespace overrides = symbols.getNamespace("override", function);
-		assertNotNull("override namespace", overrides);
-		assertNotNull("the decompiler reads the table back from jmp_<branch>",
-			symbols.getNamespace("jmp_" + self.addr("0x900c"), overrides));
 	}
 
 	/**

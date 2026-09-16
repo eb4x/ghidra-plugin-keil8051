@@ -39,7 +39,7 @@ explicit offsets.
 | `Keil8051VectorAnalyzer` | BYTE, `FORMAT_ANALYSIS.after()` | Seeds functions at the reset vector (image base) and the interrupt vectors at base+0x03, +0x0b, +0x13, … so analysis has entry points at all. |
 | `KeilSwitchTableAnalyzer` | INSTRUCTION, `CODE_ANALYSIS.before()` | Recovers the inline case tables that follow `LCALL ?C?CCASE` / `?C?ICASE` / `?C?LCASE`. |
 | `KeilJumpTableAnalyzer` | INSTRUCTION, `CODE_ANALYSIS.before()` | Recovers Keil's bounded `AJMP`-table switches, reading the case count from the compiler's own range check. |
-| `KeilSwitchOverrideAnalyzer` | INSTRUCTION, `FUNCTION_ANALYSIS.after()` | Writes the decompiler jump-table override for those switches. Without it the decompiler re-invents the unbounded table on its own. |
+| `KeilSwitchOverrideAnalyzer` | INSTRUCTION, `FUNCTION_ANALYSIS.after()` | Writes the decompiler jump-table override for those switches — only where the decompiler cannot recover the table on its own. |
 
 Both set `setSupportsOneTimeAnalysis()`, so they can be re-run from **Analysis → One Shot** on an
 already-analyzed program, and both are idempotent.
@@ -117,6 +117,14 @@ reads `CJNE A,#n` as an ordinary comparison rather than a bound and still emits 
 (`<func>::override::jmp_<branch>`, read back by `HighFunction.grabOverrides()`), which is the part
 that actually silences it. It runs after `FUNCTION_ANALYSIS` because an override has nowhere to
 live until the branch sits inside a defined function.
+
+**It only overrides where it has to.** A `basicoverride` carries destinations and nothing about what
+the index means, so the decompiler consumes it and keeps a cruder switch expression. Where the
+decompiler can recover the table itself — which a Ghidra with the CJNE guard fix does for the plain
+shape — the override makes the output worse: `switch(bVar1 * 2)` with cases `0, 2, 4 ...` instead of
+`switch(uVar1)` with cases `0..8`. So the analyzer clears any override it left before, decompiles, and
+writes one only if the decompiler did not recover that table. The decision is taken from observed
+behaviour rather than a Ghidra version, since stock Ghidra still needs the override everywhere.
 
 **A dispatch whose bound cannot be read is left alone** — guessing a table length is the very
 mistake being repaired.
