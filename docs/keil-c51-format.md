@@ -170,10 +170,39 @@ recorded here so nobody repeats the dead end:
 - **It is architecture-neutral.** `JumpBasic::analyzeGuards` is generic, and the idiom — compare,
   conditional branch, scale the index, jump into a table of jump instructions — is the classic
   branch-table form on 6502, Z80, 68k and Thumb `TBB` too, not a Keil quirk.
-- **The 129 is the clue.** 128 targets plus a default, stride 2, means the range came out as the
-  full 8-bit space: the *doubled* index (`ACC+ACC`) was chosen as the switch variable with no guard
-  applied, rather than `ACC` with range `[0,9)`. The fabricated labels bear this out — they run
-  `caseD_0` to `caseD_fe` stepping by 2, enumerating the byte offset, not the case index.
+- **Root cause, found by `dailydriver` in stock headless Ghidra with no extension present.** The
+  carry is not a varnode: `8051_main.sinc:213` defines it as `@define CY "PSW[7,1]"`, a bit-field of
+  `PSW`, so every write is a read-modify-write of the whole register and every read is a
+  shift-and-test. The raw p-code for `CJNE A,#0x9` / `JC` is:
+
+  ```
+  u700  = PSW & 0x7f
+  u600  = ACC <u 9            <- the bound, exactly as compflags promises
+  u800  = u600 << 7
+  PSW   = u700 | u800
+  ...
+  ua900 = PSW >> 7
+  uaa00 = ua900 != 0
+  CBRANCH bd65, uaa00
+  ```
+
+  Getting from the `JC`'s branch condition back to `ACC <u 9` means pulling back through five ops
+  (`INT_NOTEQUAL`, `INT_RIGHT`, `INT_OR`, `INT_LEFT`, `INT_LESS`). `JumpBasic::analyzeGuards` in
+  `jumptable.cc` gives up at `maxpullback = 2`, so no guard range is ever recorded and
+  `findSmallestNormal` falls through to the doubled value at its full 8-bit width with stride 2 —
+  which is the 128-plus-default, and the `caseD_0`…`caseD_fe` stepping by 2, seen from the other
+  end.
+
+  Two things confirm it rather than merely fitting it. The full decompiler *does* simplify that
+  chain — stock output prints the guard cleanly as `if (8 < puVar4) return puVar4;` — but jump-table
+  recovery runs early, on a partially staged function, so the guard analysis only ever sees the raw
+  bit-field form. And both warnings reproduce verbatim in stock headless Ghidra on a hand-created
+  function at `0xbd4f` with no auto-analysis at all.
+
+  **Nothing about this is 8051-specific.** Any processor whose flags are bit-fields of a status word
+  rather than standalone registers hits it the moment a compiler guards a jump table with one. My
+  earlier guess that the doubling was to blame was wrong; so was the guess before it that the guard
+  *shape* went unrecognised.
 
 The override stays regardless of what lands upstream: this extension has to work against released
 Ghidra.
