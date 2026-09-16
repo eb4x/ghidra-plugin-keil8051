@@ -12,6 +12,7 @@ almost nothing on them. This extension supplies the two pieces that get an image
 | --- | --- | --- |
 | `Keil8051VectorAnalyzer` | BYTE, `FORMAT_ANALYSIS.after()` | Seeds functions at the reset vector (image base) and the interrupt vectors at base+0x03, +0x0b, +0x13, … so analysis has entry points at all. |
 | `KeilSwitchTableAnalyzer` | INSTRUCTION, `CODE_ANALYSIS.before()` | Recovers the inline case tables that follow `LCALL ?C?CCASE` / `?C?ICASE` / `?C?LCASE`. |
+| `KeilJumpTableAnalyzer` | INSTRUCTION, `CODE_ANALYSIS.before()` | Recovers Keil's bounded `AJMP`-table switches, reading the case count from the compiler's own range check. |
 
 Both set `setSupportsOneTimeAnalysis()`, so they can be re-run from **Analysis → One Shot** on an
 already-analyzed program, and both are idempotent.
@@ -53,6 +54,36 @@ blocks inside the switch's own function, and splitting them out would fragment i
 decompiler the switch.
 
 See `docs/keil-c51-format.md` for the decoded helper bodies and the evidence behind all of this.
+
+### AJMP jump tables
+
+Keil's other `switch` shape is an inline range check and a table of `AJMP` instructions:
+
+```
+CJNE A,#0x09,$+0     ; the bound -- CJNE is here only for its carry
+JC   $+2
+AJMP default
+MOV  DPTR,#table
+ADD  A,ACC           ; index * 2
+JMP  @A+DPTR
+table: AJMP case0 / AJMP case1 / ...   ; exactly <bound> two-byte entries
+```
+
+Nothing in the bytes marks the end of that table — only the `CJNE #n` does. Ghidra does not read it
+as a bound, so its own switch recovery runs off the end: in the GL3523 L2 hub firmware it turns a
+nine-entry table into **129 cases**, relabelling unrelated code as case targets and leaving the
+decompiler to report `Unable to resolve constructor` and `Could not follow disassembly flow into
+non-existing memory` as it follows them.
+
+This analyzer reads the bound, verifies exactly that many `AJMP` slots, and lays down one
+`COMPUTED_JUMP` per case — which also stops the stock analyzer, since it skips any computed branch
+that already carries computed references. On a program analyzed before the extension was installed,
+a one-shot re-run additionally deletes the fabricated case references and their `switchD_*::caseD_*`
+labels. It does **not** delete functions the stock analyzer created at fabricated targets: some of
+those addresses are genuinely code, and that is not a call to make on a guess.
+
+**A dispatch whose bound cannot be read is left alone** — guessing a table length is the very
+mistake being repaired.
 
 ### Interrupt vectors
 

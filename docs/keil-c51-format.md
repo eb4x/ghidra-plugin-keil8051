@@ -110,6 +110,45 @@ with the case helpers:
 - scaler `0x271b` / `0x2734` — inline-constant loaders (read 5 bytes into `@R0`, then `JMP @A+DPTR`).
 - hub `0xd19f`, L1 hub `0xc792` — `POP DPH; POP DPL; POP ACC; RET`.
 
+## The other switch idiom: a bounded AJMP table
+
+Keil has a second `switch` shape, used when the cases are dense and every body is in reach. It is
+not a helper call at all — it is an inline range check and a table of `AJMP` instructions:
+
+```
+bd5d  ee           MOV  A,R6
+bd5e  b4 09 00     CJNE A,#0x09,$+0   ; the bound; CJNE is here only for its carry
+bd61  40 02        JC   $+2
+bd63  a1 ee        AJMP default
+bd65  90 bd 6b     MOV  DPTR,#0xbd6b  ; table base
+bd68  25 e0        ADD  A,ACC         ; index * 2 = AJMP entry size
+bd6a  73           JMP  @A+DPTR
+bd6b  a1 7d        AJMP 0xbd7d        ; case 0   -- exactly <bound> entries
+bd6d  a1 7f        AJMP 0xbd7f        ; case 1
+...
+bd7b  a1 d3        AJMP 0xbdd3        ; case 8
+bd7d  80 60        SJMP ...           ; past the table
+```
+
+`AJMP` takes address bits 10-8 from the three high opcode bits and the rest of the page from the
+address of the *following* instruction, so an entry can only reach within its own 2 KB page.
+
+**Nothing in the bytes marks the end of the table.** The only thing that does is the compiler's own
+`CJNE #n` / `JC`. Ghidra does not read it that way, so `DecompilerSwitchAnalyzer` treats the index
+as unbounded and fabricates a case for every value the doubled index can take: at `0xbd4f` in the
+L2 hub image that is **129 cases for a 9-entry table**, `caseD_0` through `caseD_fe`, all of it
+unrelated code relabelled. Two of the resulting decompiler errors are visible in the log:
+
+- `Unable to resolve constructor at CODE:be05` — the real instruction is `90 00 a5`
+  (`MOV DPTR,#0x00a5`) at `0xbe03`, so `0xbe05` is the byte `a5`, the 8051's one undefined opcode.
+- `Could not follow disassembly flow into non-existing memory at CODE:047f` — flow followed out of
+  the fabricated cases and off the loaded image, which is based at `0x8000`.
+
+`KeilJumpTableAnalyzer` reads the bound from the range check, verifies exactly that many `AJMP`
+slots, and lays down one `COMPUTED_JUMP` per case. A dispatch whose bound cannot be read is left
+alone: the failure being fixed is a table walked past its end, and guessing a length would be the
+same mistake again.
+
 ## Verified on fresh imports
 
 With the extension loaded, four raw imports (Raw Binary, `8051:BE:16:default`), each analysed once
