@@ -157,9 +157,26 @@ own p-code, and ignores the references already on the branch; left at that it st
 (`<func>::override::jmp_<branch>`, read back through `HighFunction.grabOverrides()`), which is what
 actually silences it.
 
-Whether the underlying gap belongs in core — the decompiler not reading `CJNE A,#n` + `JC`/`JNC` as
-a range check, on an architecture whose only compare-and-set-carry *is* `CJNE` — has been raised
-with the `dailydriver` session. The override stays regardless until something lands upstream.
+### Where the underlying fix belongs
+
+Raised with the `dailydriver` session, which read the source rather than guessing. Their findings,
+recorded here so nobody repeats the dead end:
+
+- **It is not the 8051 Sleigh semantics.** `8051_main.sinc:745` gives `CJNE A,#data8,rel8` the
+  semantics `compflags(ACC,Data); if (ACC!=Data) goto Rel8`, and `compflags` is
+  `CY = (op1 < op2)` — a plain `INT_LESS` into the carry bit, which is exactly the shape
+  `jumptable.cc`'s guard analysis wants. There is nothing to fix in the carry model. An earlier
+  guess of mine that the Sleigh semantics might be at fault was wrong.
+- **It is architecture-neutral.** `JumpBasic::analyzeGuards` is generic, and the idiom — compare,
+  conditional branch, scale the index, jump into a table of jump instructions — is the classic
+  branch-table form on 6502, Z80, 68k and Thumb `TBB` too, not a Keil quirk.
+- **The 129 is the clue.** 128 targets plus a default, stride 2, means the range came out as the
+  full 8-bit space: the *doubled* index (`ACC+ACC`) was chosen as the switch variable with no guard
+  applied, rather than `ACC` with range `[0,9)`. The fabricated labels bear this out — they run
+  `caseD_0` to `caseD_fe` stepping by 2, enumerating the byte offset, not the case index.
+
+The override stays regardless of what lands upstream: this extension has to work against released
+Ghidra.
 
 ## Verified on fresh imports
 
@@ -178,6 +195,11 @@ With the `AJMP` analyzers added, a re-import of the L2 hub image gives nine refe
 targets)`, and no `pcode error` in the application log at all. `vendor_req_A1_isp_mode_switch`
 decompiles to a nine-case `switch` under `if (bVar1 < 9)` instead of the 129-case listing full of
 `halt_baddata()`.
+
+All three `AJMP` dispatches in the L2 hub image are the same shape and all three are recovered:
+`0x89b6` (bound `0x0b`, 11 cases), `0xa81c` (bound `0x08`, 8 cases) and `0xbd6a` (bound `0x09`,
+9 cases). The overrides at `0xa81c` and `0xbd6a` both report `CONSUMED`; `0xa800`'s two log
+warnings (`pcode error at CODE:f0d2` and `at CODE:2109`) come from `0xa81c` and are gone with it.
 
 Independently confirmed by `hp-z27k-g3` on its hand-curated L2 program, running both one-shots in
 order: nine cases under `if (bVar1 < 9)`, "Switch is manually overridden", no `halt_baddata()`,
