@@ -23,11 +23,13 @@ import ghidra.util.task.TaskMonitor;
  * @param address the first table entry
  * @param entries the table entries in case order
  * @param bound the case count the compiler's own range check proves
+ * @param defaultTarget where an out-of-range switch value goes, or {@code null} when the jump after
+ *     the range check is not one this can decode; it is not a table entry and gets no reference
  * @param caseBias what table slot 0 is the case label for — 1 when the switch value was
  *     decremented before the range check, which is how Keil compiles a switch not starting at zero
  */
 public record KeilJumpTable(Address dispatch, Address jump, Address address, List<Entry> entries,
-		int bound, int caseBias) {
+		int bound, int caseBias, Address defaultTarget) {
 
 	/**
 	 * One table slot: an {@code AJMP} instruction and where it goes.
@@ -93,6 +95,11 @@ public record KeilJumpTable(Address dispatch, Address jump, Address address, Lis
 	 */
 	private static final int DEC_A = 0x14;
 
+	private static final int LJMP = 0x02;
+	private static final int SJMP = 0x80;
+	private static final int CJNE_LENGTH = 3;
+	private static final int BRANCH_LENGTH = 2;
+
 	/**
 	 * How far back to look for the range check. The shortest real gap is
 	 * {@code CJNE}(3) + branch(2) + {@code AJMP default}(2) = 7 bytes, and an {@code LJMP} default
@@ -145,11 +152,62 @@ public record KeilJumpTable(Address dispatch, Address jump, Address address, Lis
 				return null;
 			}
 			return parse(memory, dispatch, dispatch.add(shape.jumpOffset()), table, bound,
-				caseBias(memory, check));
+				caseBias(memory, check), defaultTarget(memory, check));
 		}
 		catch (MemoryAccessException | RuntimeException e) {
 			return null;
 		}
+	}
+
+	/**
+	 * Where an out-of-range switch value goes, read from the jump that follows the range check.
+	 * <p>
+	 * With {@code JC}, the in-range path branches away and the default is the jump that falls
+	 * through after it — an {@code AJMP}, {@code LJMP} or {@code SJMP}. With {@code JNC}, the branch
+	 * itself goes to the default. Returns {@code null} for anything else rather than guessing.
+	 * <p>
+	 * The default is the jump's <i>destination</i>, not the jump instruction. The decompiler reports
+	 * it either way depending on whether the destination lies in the same function — for the
+	 * GL3523 L2 hub it gives {@code 0xbdee} for {@code 0xbd6a} but {@code 0xa815}, the address of
+	 * the {@code AJMP}, for {@code 0xa81c}, whose default really goes to {@code 0xa904}.
+	 */
+	private static Address defaultTarget(Memory memory, Address boundCheck) {
+		try {
+			Address branch = boundCheck.add(CJNE_LENGTH);
+			Address afterBranch = branch.add(BRANCH_LENGTH);
+			int branchOpcode = memory.getByte(branch) & 0xff;
+			if (branchOpcode == JNC) {
+				return inLoadedMemory(memory,
+					afterBranch.add(memory.getByte(branch.add(1))));
+			}
+			if (branchOpcode != JC) {
+				return null;
+			}
+			return decodeJump(memory, afterBranch);
+		}
+		catch (MemoryAccessException | RuntimeException e) {
+			return null;
+		}
+	}
+
+	/** Destination of an {@code AJMP}, {@code LJMP} or {@code SJMP} at {@code at}, else null. */
+	private static Address decodeJump(Memory memory, Address at) throws MemoryAccessException {
+		int opcode = memory.getByte(at) & 0xff;
+		if (opcode == LJMP) {
+			return inLoadedMemory(memory, at.getNewAddress(memory.getShort(at.add(1)) & 0xffff));
+		}
+		if (opcode == SJMP) {
+			return inLoadedMemory(memory, at.add(2).add(memory.getByte(at.add(1))));
+		}
+		if ((opcode & AJMP_MASK) == AJMP_OPCODE) {
+			return ajmpTarget(memory, at);
+		}
+		return null;
+	}
+
+	private static Address inLoadedMemory(Memory memory, Address address) {
+		MemoryBlock block = memory.getBlock(address);
+		return block != null && block.isInitialized() ? address : null;
 	}
 
 	/**
@@ -206,12 +264,15 @@ public record KeilJumpTable(Address dispatch, Address jump, Address address, Lis
 	 */
 	public static KeilJumpTable parse(Memory memory, Address dispatch, Address jump, Address address,
 			int bound) {
-		return parse(memory, dispatch, jump, address, bound, 0);
+		return parse(memory, dispatch, jump, address, bound, 0, null);
 	}
 
-	/** As {@link #parse}, with the case-label bias the dispatch's {@code DEC A} implies. */
+	/**
+	 * As {@link #parse}, with the case-label bias the dispatch's {@code DEC A} implies and the
+	 * default target read from its range check.
+	 */
 	public static KeilJumpTable parse(Memory memory, Address dispatch, Address jump, Address address,
-			int bound, int caseBias) {
+			int bound, int caseBias, Address defaultTarget) {
 
 		if (bound < 1 || bound > MAX_ENTRIES) {
 			return null;
@@ -230,7 +291,8 @@ public record KeilJumpTable(Address dispatch, Address jump, Address address, Lis
 		catch (MemoryAccessException | AddressOutOfBoundsException e) {
 			return null;
 		}
-		return new KeilJumpTable(dispatch, jump, address, List.copyOf(entries), bound, caseBias);
+		return new KeilJumpTable(dispatch, jump, address, List.copyOf(entries), bound, caseBias,
+			defaultTarget);
 	}
 
 	/**

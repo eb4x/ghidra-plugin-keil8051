@@ -135,6 +135,7 @@ public class KeilJumpTableAnalyzer extends AbstractAnalyzer {
 		listing.setComment(table.address(), CommentType.PLATE, TABLE_COMMENT_TAG + ": " +
 			table.entries().size() + " case(s), bound from CJNE #0x" +
 			Integer.toHexString(table.bound()) + " at the dispatch" +
+			(table.defaultTarget() == null ? "" : ", default " + table.defaultTarget()) +
 			(table.caseBias() == 0 ? "" : "; DEC A first, so slot 0 is case " + table.caseBias()));
 		listing.setComment(table.jump(), CommentType.EOL,
 			"Keil AJMP switch: " + table.entries().size() + " cases, table at " + table.address() +

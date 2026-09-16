@@ -300,6 +300,7 @@ public class KeilJumpTableAnalyzerTest extends AbstractGenericTest {
 		assertEquals("table ends where the first case target begins",
 			hub.addr("0xbcf8"), table.end());
 		assertEquals("DEC A means slot 0 is case 1", 1, table.caseBias());
+		assertEquals("0xbcb4: AJMP a1 4c -> 0xbd4c", hub.addr("0xbd4c"), table.defaultTarget());
 		assertEquals(1, table.entries().get(0).caseValue());
 		assertEquals(28, table.entries().get(27).caseValue());
 
@@ -351,6 +352,42 @@ public class KeilJumpTableAnalyzerTest extends AbstractGenericTest {
 			}
 		}
 		return count;
+	}
+
+	@Test
+	public void recordsTheDefaultTargetFromTheJumpAfterTheRangeCheck() throws Exception {
+		KeilJumpTable table = KeilJumpTable.findAll(program, TaskMonitor.DUMMY).get(0);
+
+		// 0xbd63: AJMP a1 ee, next instruction 0xbd65, page 0xb800 -> 0xbdee
+		assertEquals(builder.addr("0xbdee"), table.defaultTarget());
+
+		analyze();
+		String plate = program.getListing().getComment(CommentType.PLATE, builder.addr("0xbd6b"));
+		assertTrue(plate, plate.contains("default CODE:bdee"));
+	}
+
+	/**
+	 * GL3523 L2 hub, 0xa81c: the default's AJMP ({@code 21 04} at 0xa815) goes to 0xa904 — as
+	 * Ghidra's own disassembly shows. By hand it is easy to get 0xa104 instead: the page is taken
+	 * from the <i>following</i> instruction, and {@code 0xa817 & 0xf800} is {@code 0xa800}, not
+	 * {@code 0xa000}. The decompiler, for its part, reports this default as 0xa815, the address of
+	 * the jump rather than its destination, because the destination lies outside the function.
+	 */
+	@Test
+	public void decodesTheDefaultWithTheFollowingInstructionsPage() throws Exception {
+		ProgramBuilder hub = new ProgramBuilder("a81c", ProgramBuilder._8051);
+		hub.createMemory("CODE", "0x8000", 0x6312);
+		// MOV A,@R0 / CJNE A,#8 / JC / AJMP default / MOV DPTR,#0xa81d / ADD A,ACC / JMP @A+DPTR,
+		// then the real eight-slot table
+		hub.setBytes("0xa80f", "e6 b4 08 00 40 02 21 04 90 a8 1d 25 e0 73");
+		hub.setBytes("0xa81d", "01 fe 01 2d 01 38 01 97 01 f6 01 73 01 81 01 8c");
+
+		KeilJumpTable table = KeilJumpTable.findAll(hub.getProgram(), TaskMonitor.DUMMY).get(0);
+
+		assertEquals(8, table.entries().size());
+		assertEquals("the destination, not the jump at 0xa815, and not 0xa104",
+			hub.addr("0xa904"), table.defaultTarget());
+		assertEquals(hub.addr("0xa8fe"), table.entries().get(0).target());
 	}
 
 	@Test
