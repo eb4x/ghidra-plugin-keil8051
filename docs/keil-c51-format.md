@@ -127,9 +127,12 @@ Two results worth keeping:
 - The L2 hub's hand-curated copy has 253 functions after manual work; the fresh import reaches 282
   with none. The switch at `0x8811` is in a region auto-analysis never reaches by flow, and it is
   recovered anyway.
-- The main scaler firmware contains the inline-constant loaders at `0x0465` and `0x0483`, which
-  also pop their return address. They were **not** matched as case helpers, which is the negative
-  case that matters.
+- The main scaler firmware contains the inline-constant loaders, which also pop their return
+  address. They were **not** matched as case helpers, which is the negative case that matters.
+  Their addresses depend on what you anchor to: the first routine is `0x0465`, where the pop pair
+  is also the entry; the second's entry is `0x047e` (`MOV R0,DPL; MOV B,DPH`) with its pop pair at
+  `0x0483`. A caller lands on `0x047e`. Nothing in this extension names either — they are matched
+  by nothing, which is the point.
 
 ## "Banked" code — there is no software bank switching
 
