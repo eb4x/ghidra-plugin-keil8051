@@ -121,6 +121,11 @@ live until the branch sits inside a defined function.
 **A dispatch whose bound cannot be read is left alone** — guessing a table length is the very
 mistake being repaired.
 
+Worth knowing: a pending core fix recovers the plain shape without this extension, but **not** the
+page-carry shape — stock and patched Ghidra both give up there with "Could not recover jumptable.
+Too many branches", because the table base becomes a branch-dependent select rather than a single
+switch variable. For that shape this extension is the only thing that recovers the table.
+
 ### Interrupt vectors
 
 8051 hardware fixes the entry points: reset runs from offset 0 and every interrupt enters at

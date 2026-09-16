@@ -232,8 +232,28 @@ recorded here so nobody repeats the dead end:
   earlier guess that the doubling was to blame was wrong; so was the guess before it that the guard
   *shape* went unrecognised.
 
-The override stays regardless of what lands upstream: this extension has to work against released
-Ghidra.
+**The override is not only a stopgap.** `dailydriver`'s fix (raised pullback budget plus an
+`INT_LEFT` pullback in `CircleRange`) recovers `0x89b6`, `0xa81c` and `0xbd6a` exactly in stock
+Ghidra — but **not** `0xbcbf`, and neither does stock. Both builds give up there with
+*"Could not recover jumptable at 0xbcbf. Too many branches"* and render an indirect call:
+
+```
+sVar2 = -0x4340;
+if (CARRY1(bVar1,bVar1)) sVar2 = -0x4240;
+(*(code *)(sVar2 + (ushort)(bVar1 * '\x02')))();
+```
+
+The guard and the `DEC A` are both handled fine in their build; the blocker is the page-carry
+fix-up. The table base is a select between two constants that depends on a branch, and the
+jump-table model wants one data-flow path from a single switch variable to the jump. The only value
+both inputs share is the final address, which ranges over 65536 values — hence "too many branches".
+Fixing it needs either range-based dead-branch folding (proving `CARRY1(bVar1,bVar1)` is always
+false once the guard holds) or a model that follows a select depending on the index; both are
+larger changes, noted upstream as a follow-up rather than folded into that PR.
+
+So for the page-carry shape this extension is the only thing that recovers the table at all, before
+or after the core fix ships. For the other three the override will simply agree with what the
+decompiler finds on its own.
 
 ## Verified on fresh imports
 
