@@ -17,7 +17,9 @@ import ghidra.program.model.listing.CommentType;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.RefType;
 import ghidra.program.model.symbol.Reference;
+import ghidra.program.model.symbol.Namespace;
 import ghidra.program.model.symbol.SourceType;
+import ghidra.program.model.symbol.SymbolTable;
 import ghidra.util.task.TaskMonitor;
 
 /**
@@ -151,6 +153,54 @@ public class KeilJumpTableAnalyzerTest extends AbstractGenericTest {
 		finally {
 			plain.endTransaction(txId, true);
 		}
+	}
+
+	/**
+	 * The override is what actually silences the decompiler, so it is tested on a self-contained
+	 * dispatch whose flow closes — the real hub bytes reach code this fixture does not contain, and
+	 * without a function body around the branch there is nowhere for Ghidra to store an override.
+	 */
+	@Test
+	public void writesADecompilerOverrideSoTheDecompilerStopsGuessing() throws Exception {
+		ProgramBuilder self = new ProgramBuilder("selfcontained", ProgramBuilder._8051);
+		self.createMemory("CODE", "0x9000", 0x100);
+		//     CJNE A,#2 / JC / AJMP default / MOV DPTR,#0x900d / ADD A,ACC / JMP @A+DPTR
+		//     then two AJMP entries, their RET bodies, and the default's RET.
+		self.setBytes("0x9000", "b4 02 00 40 02 01 15 90 90 0d 25 e0 73 01 11 01 13 22 00 22 00 22");
+		Program tiny = self.getProgram();
+
+		int txId = tiny.startTransaction("recover and override");
+		try {
+			assertTrue(new KeilJumpTableAnalyzer().added(tiny, new AddressSet(), TaskMonitor.DUMMY,
+				new MessageLog()));
+		}
+		finally {
+			tiny.endTransaction(txId, true);
+		}
+		self.disassemble("0x9000", 13);
+		txId = tiny.startTransaction("function and override");
+		try {
+			new ghidra.app.cmd.function.CreateFunctionCmd("dispatch", self.addr("0x9000"), null,
+				SourceType.ANALYSIS).applyTo(tiny, TaskMonitor.DUMMY);
+			assertNotNull("precondition: the branch must sit inside a function",
+				tiny.getFunctionManager().getFunctionContaining(self.addr("0x900c")));
+
+			assertTrue("an override must be written for the recovered table",
+				new KeilSwitchOverrideAnalyzer().added(tiny, new AddressSet(), TaskMonitor.DUMMY,
+					new MessageLog()));
+		}
+		finally {
+			tiny.endTransaction(txId, true);
+		}
+
+		// Ghidra stores an override purely as symbols under <func>::override::jmp_<branch>.
+		SymbolTable symbols = tiny.getSymbolTable();
+		Namespace function = (Namespace) tiny.getFunctionManager()
+			.getFunctionContaining(self.addr("0x900c"));
+		Namespace overrides = symbols.getNamespace("override", function);
+		assertNotNull("override namespace", overrides);
+		assertNotNull("the decompiler reads the table back from jmp_<branch>",
+			symbols.getNamespace("jmp_" + self.addr("0x900c"), overrides));
 	}
 
 	@Test

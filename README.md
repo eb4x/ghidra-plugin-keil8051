@@ -13,6 +13,7 @@ almost nothing on them. This extension supplies the two pieces that get an image
 | `Keil8051VectorAnalyzer` | BYTE, `FORMAT_ANALYSIS.after()` | Seeds functions at the reset vector (image base) and the interrupt vectors at base+0x03, +0x0b, +0x13, … so analysis has entry points at all. |
 | `KeilSwitchTableAnalyzer` | INSTRUCTION, `CODE_ANALYSIS.before()` | Recovers the inline case tables that follow `LCALL ?C?CCASE` / `?C?ICASE` / `?C?LCASE`. |
 | `KeilJumpTableAnalyzer` | INSTRUCTION, `CODE_ANALYSIS.before()` | Recovers Keil's bounded `AJMP`-table switches, reading the case count from the compiler's own range check. |
+| `KeilSwitchOverrideAnalyzer` | INSTRUCTION, `FUNCTION_ANALYSIS.after()` | Writes the decompiler jump-table override for those switches. Without it the decompiler re-invents the unbounded table on its own. |
 
 Both set `setSupportsOneTimeAnalysis()`, so they can be re-run from **Analysis → One Shot** on an
 already-analyzed program, and both are idempotent.
@@ -76,11 +77,20 @@ decompiler to report `Unable to resolve constructor` and `Could not follow disas
 non-existing memory` as it follows them.
 
 This analyzer reads the bound, verifies exactly that many `AJMP` slots, and lays down one
-`COMPUTED_JUMP` per case — which also stops the stock analyzer, since it skips any computed branch
-that already carries computed references. On a program analyzed before the extension was installed,
+`COMPUTED_JUMP` per case — which also stops `DecompilerSwitchAnalyzer` creating its case labels,
+since it skips any computed branch that already carries computed references. On a program analyzed
+before the extension was installed,
 a one-shot re-run additionally deletes the fabricated case references and their `switchD_*::caseD_*`
 labels. It does **not** delete functions the stock analyzer created at fabricated targets: some of
 those addresses are genuinely code, and that is not a call to make on a guess.
+
+**Fixing the references is not enough on its own.** The decompiler recovers jump tables from its
+own p-code and pays no attention to the references already on the branch, so left alone it still
+reads `CJNE A,#n` as an ordinary comparison rather than a bound and still emits all 129 cases.
+`KeilSwitchOverrideAnalyzer` writes a real jump-table override
+(`<func>::override::jmp_<branch>`, read back by `HighFunction.grabOverrides()`), which is the part
+that actually silences it. It runs after `FUNCTION_ANALYSIS` because an override has nowhere to
+live until the branch sits inside a defined function.
 
 **A dispatch whose bound cannot be read is left alone** — guessing a table length is the very
 mistake being repaired.

@@ -149,6 +149,18 @@ slots, and lays down one `COMPUTED_JUMP` per case. A dispatch whose bound cannot
 alone: the failure being fixed is a table walked past its end, and guessing a length would be the
 same mistake again.
 
+**References alone do not fix the decompiler.** They stop `DecompilerSwitchAnalyzer` creating the
+129 case labels — measurable, and confirmed on a fresh import: nine references off `0xbd6a` and no
+`switchD_` symbol anywhere in the program. But the decompiler recovers jump tables itself, from its
+own p-code, and ignores the references already on the branch; left at that it still produces all
+129 cases and both warnings. `KeilSwitchOverrideAnalyzer` writes a real jump-table override
+(`<func>::override::jmp_<branch>`, read back through `HighFunction.grabOverrides()`), which is what
+actually silences it.
+
+Whether the underlying gap belongs in core — the decompiler not reading `CJNE A,#n` + `JC`/`JNC` as
+a range check, on an architecture whose only compare-and-set-carry *is* `CJNE` — has been raised
+with the `dailydriver` session. The override stays regardless until something lands upstream.
+
 ## Verified on fresh imports
 
 With the extension loaded, four raw imports (Raw Binary, `8051:BE:16:default`), each analysed once
@@ -160,6 +172,15 @@ with no manual work, and deleted afterwards:
 | GL3523 L1 hub | `0x8000` | 10 | `?C?CCASE` @ `0xbc89` | `0x8814` (10 cases), `0xa13c` (12) | 226 |
 | USB-PD module (file `0x108000`, 64 KB) | 0 | 10 | all three | none — no call sites in this module | 637 |
 | main scaler firmware (file `0x20080`, 64 KB) | 0 | 10 | none | none | 65 |
+
+With the `AJMP` analyzers added, a re-import of the L2 hub image gives nine references off
+`0xbd6a`, no `switchD_` symbol anywhere, an override reported `CONSUMED (9 cases -> 9 distinct
+targets)`, and no `pcode error` in the application log at all. `vendor_req_A1_isp_mode_switch`
+decompiles to a nine-case `switch` under `if (bVar1 < 9)` instead of the 129-case listing full of
+`halt_baddata()`.
+
+The main scaler module contains **no** `JMP @A+DPTR` at all, so this idiom is not what limits it to
+65 functions in 64 KB. Whatever reaches the rest of that module, it is not a Keil `AJMP` switch.
 
 Two results worth keeping:
 

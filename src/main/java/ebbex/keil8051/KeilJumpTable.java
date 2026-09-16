@@ -5,9 +5,12 @@ import java.util.List;
 
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressOutOfBoundsException;
+import ghidra.program.model.listing.Program;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.util.exception.CancelledException;
+import ghidra.util.task.TaskMonitor;
 
 /**
  * One parsed Keil {@code AJMP}-table switch: the bounded {@code JMP @A+DPTR} dispatch and the table
@@ -41,6 +44,103 @@ public record KeilJumpTable(Address dispatch, Address jump, Address address, Lis
 	 * smaller. The cap only bounds the work done on a pattern that is not really a dispatch.
 	 */
 	private static final int MAX_ENTRIES = 128;
+
+	/** {@code MOV DPTR,#imm16; ADD A,ACC; JMP @A+DPTR} — the dispatch, with the table address open. */
+	private static final byte[] DISPATCH = {
+		(byte) 0x90, 0, 0, (byte) 0x25, (byte) 0xe0, (byte) 0x73
+	};
+	private static final byte[] DISPATCH_MASK = {
+		(byte) 0xff, 0, 0, (byte) 0xff, (byte) 0xff, (byte) 0xff
+	};
+
+	/** Offset of {@code JMP @A+DPTR} within the dispatch pattern. */
+	private static final int JUMP_OFFSET = 5;
+
+	private static final int CJNE_A_IMM = 0xb4;
+	private static final int JC = 0x40;
+	private static final int JNC = 0x50;
+
+	/**
+	 * How far back to look for the range check. The shortest real gap is
+	 * {@code CJNE}(3) + branch(2) + {@code AJMP default}(2) = 7 bytes, and an {@code LJMP} default
+	 * or a register move makes it a little more.
+	 */
+	private static final int BOUND_SEARCH_MIN = 5;
+	private static final int BOUND_SEARCH_MAX = 14;
+
+	/**
+	 * Every bounded {@code AJMP}-table dispatch in the program.
+	 * <p>
+	 * Discovery is by byte pattern rather than over disassembled instructions so that a dispatch in
+	 * code nothing has reached yet is still found — the same reason {@link KeilSwitchTableAnalyzer}
+	 * works from bytes.
+	 */
+	public static List<KeilJumpTable> findAll(Program program, TaskMonitor monitor)
+			throws CancelledException {
+
+		Memory memory = program.getMemory();
+		List<KeilJumpTable> found = new ArrayList<>();
+		Address from = memory.getMinAddress();
+		while (from != null) {
+			monitor.checkCancelled();
+			Address at = memory.findBytes(from, DISPATCH, DISPATCH_MASK, true, monitor);
+			if (at == null) {
+				break;
+			}
+			KeilJumpTable table = parseDispatch(memory, at);
+			if (table != null) {
+				found.add(table);
+			}
+			from = at.next();
+		}
+		return found;
+	}
+
+	/** Reads the table address out of the dispatch and the case count out of the range check. */
+	private static KeilJumpTable parseDispatch(Memory memory, Address dispatch) {
+		try {
+			Address table = dispatch.getNewAddress(memory.getShort(dispatch.add(1)) & 0xffff);
+			int bound = readBound(memory, dispatch);
+			if (bound < 1) {
+				return null;
+			}
+			return parse(memory, dispatch, dispatch.add(JUMP_OFFSET), table, bound);
+		}
+		catch (MemoryAccessException | RuntimeException e) {
+			return null;
+		}
+	}
+
+	/**
+	 * The case count, from the {@code CJNE A,#n} whose carry the following {@code JC}/{@code JNC}
+	 * tests. Returns 0 when there is no such check, which means the dispatch is left alone: the
+	 * failure being repaired is a table walked past its end, and guessing a length would be the
+	 * same mistake again.
+	 */
+	private static int readBound(Memory memory, Address dispatch) throws MemoryAccessException {
+		for (int back = BOUND_SEARCH_MIN; back <= BOUND_SEARCH_MAX; back++) {
+			Address at;
+			try {
+				at = dispatch.subtract(back);
+			}
+			catch (RuntimeException e) {
+				return 0;
+			}
+			if ((memory.getByte(at) & 0xff) != CJNE_A_IMM) {
+				continue;
+			}
+			int branch = memory.getByte(at.add(3)) & 0xff;
+			if (branch == JC || branch == JNC) {
+				return memory.getByte(at.add(1)) & 0xff;
+			}
+		}
+		return 0;
+	}
+
+	/** The addresses this switch can branch to, in case order. */
+	public List<Address> destinations() {
+		return entries.stream().map(Entry::address).toList();
+	}
 
 	/**
 	 * Parses the {@code bound}-entry table at {@code address}, or returns {@code null} if the bytes
