@@ -110,6 +110,27 @@ with the case helpers:
 - scaler `0x271b` / `0x2734` — inline-constant loaders (read 5 bytes into `@R0`, then `JMP @A+DPTR`).
 - hub `0xd19f`, L1 hub `0xc792` — `POP DPH; POP DPL; POP ACC; RET`.
 
+## Verified on fresh imports
+
+With the extension loaded, four raw imports (Raw Binary, `8051:BE:16:default`), each analysed once
+with no manual work, and deleted afterwards:
+
+| program | base | vectors seeded | case helpers | tables recovered | functions |
+| --- | --- | --- | --- | --- | --- |
+| GL3523 L2 hub | `0x8000` | 10 | `?C?CCASE` @ `0xc176` | `0x8814` (10 cases), `0xa3a8` (12) | 282 |
+| GL3523 L1 hub | `0x8000` | 10 | `?C?CCASE` @ `0xbc89` | `0x8814` (10 cases), `0xa13c` (12) | 226 |
+| USB-PD module (file `0x108000`, 64 KB) | 0 | 10 | all three | none — no call sites in this module | 637 |
+| main scaler firmware (file `0x20080`, 64 KB) | 0 | 10 | none | none | 65 |
+
+Two results worth keeping:
+
+- The L2 hub's hand-curated copy has 253 functions after manual work; the fresh import reaches 282
+  with none. The switch at `0x8811` is in a region auto-analysis never reaches by flow, and it is
+  recovered anyway.
+- The main scaler firmware contains the inline-constant loaders at `0x0465` and `0x0483`, which
+  also pop their return address. They were **not** matched as case helpers, which is the negative
+  case that matters.
+
 ## "Banked" code — there is no software bank switching
 
 Investigated and **disproved**. The MStar (MST9U) scaler image is not banked in any sense an
