@@ -21,6 +21,7 @@ import ghidra.program.model.data.WordDataType;
 import ghidra.program.model.listing.CodeUnit;
 import ghidra.program.model.listing.CommentType;
 import ghidra.program.model.listing.Data;
+import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.Listing;
 import ghidra.program.model.listing.Program;
@@ -101,7 +102,7 @@ public class KeilSwitchTableAnalyzer extends AbstractAnalyzer {
 		int cases = 0;
 		for (Map.Entry<Address, KeilCaseHelper> helper : helpers.entrySet()) {
 			monitor.checkCancelled();
-			nameHelper(program, helper.getKey(), helper.getValue());
+			prepareHelper(program, helper.getKey(), helper.getValue());
 			for (Address site : findCallSites(program, helper.getKey(), monitor)) {
 				monitor.checkCancelled();
 				KeilCaseTable table = applyTable(program, site, helper.getValue(), targets, monitor);
@@ -323,24 +324,45 @@ public class KeilSwitchTableAnalyzer extends AbstractAnalyzer {
 				table.address() + ", does not return");
 	}
 
-	/** Gives the helper a name and records which Keil library routine it is. */
-	private void nameHelper(Program program, Address at, KeilCaseHelper helper) {
-		SymbolTable symbols = program.getSymbolTable();
-		Symbol primary = symbols.getPrimarySymbol(at);
-		if (primary != null && primary.getSource() != SourceType.DEFAULT) {
-			return;
-		}
-
+	/**
+	 * Makes the helper a function that <b>does not return</b>, and names it if nobody has.
+	 * <p>
+	 * The no-return marking is what keeps the decompiler out of the case table. Clearing each call
+	 * site's fall-through fixes the listing only: the decompiler ignores it, treats the call as
+	 * returning, and decodes the table bytes that follow as instructions. Measured on the GL3523 L2
+	 * hub image at 0x8811 — {@code keil_ccase_switch(...); nop(); SFR95 = Var2; SFR88 = Var1 + 1}
+	 * is the table at 0x8814 read as code. The helper pops its own return address and jumps to a
+	 * case, so no-return is simply the truth about it.
+	 * <p>
+	 * That marking is applied whether or not the helper already has a name. A session that named it
+	 * by hand before this analyzer ran still needs it, and skipping the whole helper on a user name,
+	 * as an earlier version did, would have left exactly those programs broken.
+	 */
+	private void prepareHelper(Program program, Address at, KeilCaseHelper helper) {
 		AddressSet body = new AddressSet(at, at.add(helper.signature().length - 1));
 		new DisassembleCommand(body, null, true).applyTo(program, TaskMonitor.DUMMY);
 		if (program.getFunctionManager().getFunctionAt(at) == null) {
 			new CreateFunctionCmd(helper.label(), at, null, SourceType.ANALYSIS)
 				.applyTo(program, TaskMonitor.DUMMY);
 		}
+		Function function = program.getFunctionManager().getFunctionAt(at);
+		if (function != null && !function.hasNoReturn()) {
+			function.setNoReturn(true);
+		}
+
+		SymbolTable symbols = program.getSymbolTable();
+		Symbol primary = symbols.getPrimarySymbol(at);
+		if (primary != null && primary.getSource() != SourceType.DEFAULT &&
+			!primary.getName().equals(helper.label())) {
+			// Someone named it; their name and plate comment stand.
+			return;
+		}
 		label(symbols, at, helper.label());
-		program.getListing().setComment(at, CommentType.PLATE,
-			"Keil C51 library routine " + helper.keilSymbol() + "\n" +
-				"Pops its return address to find the inline case table that follows each call site, " +
-				"walks it, and jumps to the matching case. Never returns to the caller.");
+		if (program.getListing().getComment(CommentType.PLATE, at) == null) {
+			program.getListing().setComment(at, CommentType.PLATE,
+				"Keil C51 library routine " + helper.keilSymbol() + "\n" +
+					"Pops its return address to find the inline case table that follows each call " +
+					"site, walks it, and jumps to the matching case. Never returns to the caller.");
+		}
 	}
 }

@@ -3,6 +3,8 @@ package ebbex.keil8051;
 import static org.junit.Assert.*;
 
 import java.util.HashSet;
+import java.util.List;
+import java.util.ArrayList;
 import java.util.Set;
 
 import org.junit.Before;
@@ -17,6 +19,7 @@ import ghidra.program.model.listing.CommentType;
 import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.RefType;
+import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.Reference;
 import ghidra.util.task.TaskMonitor;
 
@@ -143,6 +146,63 @@ public class KeilSwitchTableAnalyzerTest extends AbstractGenericTest {
 
 		assertEquals(KeilCaseHelper.CCASE.label(),
 			program.getSymbolTable().getPrimarySymbol(builder.addr("0xc176")).getName());
+	}
+
+	/**
+	 * The decompiler must not read the inline case table as code.
+	 * <p>
+	 * Fixing the listing is not enough. On the real image, with the fall-through cleared and every
+	 * case reference in place, the decompiler still treated {@code keil_ccase_switch} as a call
+	 * that returns and decoded the table bytes at 0x8814 as instructions —
+	 * {@code nop(); UNK_SFR_95 = uVar2; TCON = cVar1 + '\x01'; ...} — because it ignores the
+	 * listing's fall-through and never reached a switch at all. That went unnoticed because no
+	 * function contained 0x8811 to decompile: its entry, 0x8800, is reached only indirectly.
+	 * <p>
+	 * The check is on addresses rather than on which garbage appears: no p-code in the decompiled
+	 * function may come from inside the table.
+	 */
+	@Test
+	public void theDecompilerDoesNotReadTheCaseTableAsCode() throws Exception {
+		// The real prologue at 0x8800: load the switch value and parameters from IDATA, then the
+		// LCALL ?C?CCASE at 0x8811 that setUp already placed.
+		builder.setBytes("0x8800", "ac 6e 85 6c 48 aa 6f e4 f9 ec 75 4a 00 f5 49 e5 48");
+		assertTrue(analyze());
+		builder.disassemble("0x8800", 0x14);
+
+		int txId = program.startTransaction("function");
+		try {
+			new ghidra.app.cmd.function.CreateFunctionCmd("switch_function", builder.addr("0x8800"),
+				null, SourceType.ANALYSIS).applyTo(program, TaskMonitor.DUMMY);
+		}
+		finally {
+			program.endTransaction(txId, true);
+		}
+
+		Address tableStart = builder.addr("0x8814");
+		Address tableEnd = builder.addr("0x8836");      // exclusive: 0x8836 is case 0x04's body
+		ghidra.app.decompiler.DecompInterface decompiler =
+			new ghidra.app.decompiler.DecompInterface();
+		try {
+			assertTrue(decompiler.openProgram(program));
+			var results = decompiler.decompileFunction(
+				program.getFunctionManager().getFunctionAt(builder.addr("0x8800")), 30,
+				TaskMonitor.DUMMY);
+			assertTrue(results.decompileCompleted());
+
+			List<Address> fromTable = new ArrayList<>();
+			var ops = results.getHighFunction().getPcodeOps();
+			while (ops.hasNext()) {
+				Address at = ops.next().getSeqnum().getTarget();
+				if (at.compareTo(tableStart) >= 0 && at.compareTo(tableEnd) < 0) {
+					fromTable.add(at);
+				}
+			}
+			assertTrue("the case table was decompiled as code, at " + fromTable + ":\n" +
+				results.getDecompiledFunction().getC(), fromTable.isEmpty());
+		}
+		finally {
+			decompiler.dispose();
+		}
 	}
 
 	@Test
