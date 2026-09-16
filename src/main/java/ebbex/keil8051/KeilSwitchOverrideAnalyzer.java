@@ -3,7 +3,9 @@ package ebbex.keil8051;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import ghidra.app.decompiler.DecompInterface;
@@ -29,8 +31,16 @@ import ghidra.util.exception.InvalidInputException;
 import ghidra.util.task.TaskMonitor;
 
 /**
- * Tells the decompiler how big Keil's {@code AJMP} jump tables really are — but only where the
- * decompiler cannot work it out itself.
+ * Gives the decompiler the destinations of Keil's switches, through jump-table overrides.
+ * <p>
+ * <b>{@code ?C?xCASE} switches</b> always get one. {@link KeilSwitchTableAnalyzer} replaces each
+ * call to a case helper with an injected indirect branch, but the value-to-target mapping lives
+ * in a table the helper walks at run time, which no data-flow analysis can follow; the override at
+ * the call site is the only way the decompiler learns the cases. Case labels come out as addresses:
+ * a {@code basicoverride} carries destinations and cannot carry values, and there is no arithmetic
+ * path from the switch variable to the target for the decompiler to derive them from.
+ * <p>
+ * <b>{@code AJMP} jump tables</b> get one only where the decompiler cannot work them out itself.
  * <p>
  * {@link KeilJumpTableAnalyzer} repairs the <i>references</i>. It does not repair the decompiler,
  * which recovers jump tables from its own p-code and pays no attention to references already on a
@@ -64,11 +74,14 @@ public class KeilSwitchOverrideAnalyzer extends AbstractAnalyzer {
 
 	private static final String NAME = "Keil C51 switch overrides";
 	private static final String DESCRIPTION =
-		"Writes decompiler jump-table overrides for the bounded AJMP switches recovered by the " +
-			"Keil C51 AJMP jump tables analyzer, where the decompiler cannot recover them itself. " +
-			"Stands aside where it can, since an override renders the switch less clearly.";
+		"Writes decompiler jump-table overrides for Keil switches: always at ?C?CCASE/?C?ICASE/" +
+			"?C?LCASE call sites, and at bounded AJMP switches only where the decompiler cannot " +
+			"recover them itself, since an override renders those less clearly.";
 
 	private static final int DECOMPILE_TIMEOUT_SECONDS = 30;
+
+	/** {@code LCALL addr16}: the case table starts right after it. */
+	private static final int LCALL_LENGTH = 3;
 
 	private static final String OVERRIDE_NAMESPACE = "override";
 	private static final String JUMP_NAMESPACE_PREFIX = "jmp_";
@@ -89,9 +102,67 @@ public class KeilSwitchOverrideAnalyzer extends AbstractAnalyzer {
 	public boolean added(Program program, AddressSetView set, TaskMonitor monitor, MessageLog log)
 			throws CancelledException {
 
+		int caseTables = overrideCaseTables(program, monitor, log);
+		int[] ajmp = overrideJumpTables(program, monitor, log);
+
+		if (caseTables > 0 || ajmp[0] > 0 || ajmp[1] > 0) {
+			// Msg.info only, never log.appendMsg: any content in the analysis MessageLog makes
+			// AutoAnalysisPlugin pop a "warnings/errors issued during analysis" dialog.
+			Msg.info(this, "Keil C51: wrote " + caseTables + " ?C?xCASE and " + ajmp[0] +
+				" AJMP switch override(s); " + ajmp[1] +
+				" AJMP table(s) recovered by the decompiler without one");
+		}
+		return caseTables > 0 || ajmp[0] > 0;
+	}
+
+	/**
+	 * Overrides every {@code ?C?xCASE} call site that sits inside a function.
+	 * <p>
+	 * These always need one. The helper's call-fixup (installed by {@link KeilSwitchTableAnalyzer})
+	 * turns the call into an indirect branch, but nothing tells the decompiler where it goes: the
+	 * value-to-target mapping lives in a table the helper walks at run time, which no data-flow
+	 * analysis can follow. So there is no stand-aside test here, unlike the AJMP tables.
+	 * <p>
+	 * The destinations are the cases and the default, deduplicated — several case values often
+	 * share a body, and a jump table lists each destination once.
+	 */
+	private int overrideCaseTables(Program program, TaskMonitor monitor, MessageLog log)
+			throws CancelledException {
+
+		int written = 0;
+		for (Map.Entry<Address, KeilCaseHelper> helper : KeilSwitchTableAnalyzer
+				.findHelpers(program, monitor).entrySet()) {
+			for (Address site : KeilSwitchTableAnalyzer.findCallSites(program, helper.getKey(),
+				monitor)) {
+				monitor.checkCancelled();
+				KeilCaseTable table = KeilCaseTable.parse(program.getMemory(), helper.getValue(),
+					site.add(LCALL_LENGTH));
+				if (table == null) {
+					continue;
+				}
+				Function function = program.getFunctionManager().getFunctionContaining(site);
+				if (!(function instanceof FunctionDB)) {
+					// No defined function yet; a later pass will catch it.
+					continue;
+				}
+				Set<Address> destinations = new LinkedHashSet<>();
+				table.cases().forEach(entry -> destinations.add(entry.target()));
+				destinations.add(table.defaultTarget());
+				if (writeOverride(function, site, new ArrayList<>(destinations), log)) {
+					written++;
+				}
+			}
+		}
+		return written;
+	}
+
+	/** The AJMP tables: override where the decompiler cannot recover them. Returns {written, stoodAside}. */
+	private int[] overrideJumpTables(Program program, TaskMonitor monitor, MessageLog log)
+			throws CancelledException {
+
 		List<KeilJumpTable> tables = KeilJumpTable.findAll(program, monitor);
 		if (tables.isEmpty()) {
-			return false;
+			return new int[] { 0, 0 };
 		}
 
 		DecompInterface decompiler = new DecompInterface();
@@ -107,7 +178,6 @@ public class KeilSwitchOverrideAnalyzer extends AbstractAnalyzer {
 				Function function =
 					program.getFunctionManager().getFunctionContaining(table.jump());
 				if (!(function instanceof FunctionDB)) {
-					// No defined function yet; a later pass over this dispatch will catch it.
 					continue;
 				}
 
@@ -120,7 +190,7 @@ public class KeilSwitchOverrideAnalyzer extends AbstractAnalyzer {
 					stoodAside++;
 					continue;
 				}
-				if (writeOverride(function, table, log)) {
+				if (writeOverride(function, table.jump(), table.destinations(), log)) {
 					written++;
 				}
 			}
@@ -130,14 +200,7 @@ public class KeilSwitchOverrideAnalyzer extends AbstractAnalyzer {
 				decompiler.dispose();
 			}
 		}
-
-		if (written > 0 || stoodAside > 0) {
-			// Msg.info only, never log.appendMsg: any content in the analysis MessageLog makes
-			// AutoAnalysisPlugin pop a "warnings/errors issued during analysis" dialog.
-			Msg.info(this, "Keil C51: wrote " + written + " switch table override(s); " +
-				stoodAside + " recovered by the decompiler without one");
-		}
-		return written > 0;
+		return new int[] { written, stoodAside };
 	}
 
 	/** Decompiles {@code function} and reports whether it recovered {@code table} unaided. */
@@ -181,16 +244,17 @@ public class KeilSwitchOverrideAnalyzer extends AbstractAnalyzer {
 		return extra.size() <= 1;
 	}
 
-	private boolean writeOverride(Function function, KeilJumpTable table, MessageLog log) {
-		JumpTable override = new JumpTable(table.jump(), new ArrayList<>(table.destinations()),
-			true, EquateSymbol.FORMAT_DEFAULT);
+	private boolean writeOverride(Function function, Address branch, List<Address> destinations,
+			MessageLog log) {
+		JumpTable override =
+			new JumpTable(branch, new ArrayList<>(destinations), true, EquateSymbol.FORMAT_DEFAULT);
 		try {
 			override.writeOverride(function);
 			return true;
 		}
 		catch (InvalidInputException e) {
 			log.appendMsg(String.format("Keil C51: could not override switch at %s in %s: %s",
-				table.jump(), function.getName(), e.getMessage()));
+				branch, function.getName(), e.getMessage()));
 			return false;
 		}
 	}

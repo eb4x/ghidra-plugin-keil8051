@@ -102,6 +102,44 @@ In both, the byte after the table is itself a case target (`0x8836` is case `0x0
 case `0x08`), which is why flow resumes correctly once the targets are disassembled — there is no
 need to "resume after the terminator" as a separate step.
 
+## Decompiling a `?C?xCASE` switch
+
+Recovering the table fixes the **listing**, not the decompiler. The decompiler ignores a call
+site's cleared fall-through, treats the helper as a call that returns, and decodes the table bytes
+after it as instructions. GL3523 L2 hub, function `0x8800` (whose entry is reached only indirectly,
+which is why this went unnoticed — no function contained `0x8811` to decompile):
+
+```
+keil_ccase_switch(DAT_INTMEM_6c,0,DAT_INTMEM_6f);
+nop(); INTMEM29 = param_2; SFR95 = Var2; SFR88 = Var1 + 1; ...     <- the table at 0x8814
+```
+
+The fix, settled with `dailydriver` as extension territory rather than core:
+
+- Each helper gets a **call-fixup**, installed as a compiler-spec extension and bound with
+  `Function.setCallFixup`. Its body is one indirect branch on the switch value —
+  `local t:2 = zext(ACC); goto [t];` for `?C?CCASE` — so the decompiler sees a `BRANCHIND` at the
+  call site instead of a returning call.
+- A **jump-table override** keyed at the call site supplies the destinations: the cases plus the
+  default, deduplicated. Injected ops carry the call site's address, which is how the override
+  attaches to the injected branch.
+
+Result, verified by a unit test running the real decompiler on these bytes:
+
+```
+switch(DAT_INTMEM_6c) {        <- the value the prologue loaded into A
+case 0x8836: ...               <- ten destinations: nine case bodies and the default 0x8b2b
+```
+
+Two limits. Case labels are **addresses**, not the case values: a `basicoverride` carries
+destinations only, and it can derive values only by emulating a data-flow path from the switch
+variable to the branch — here the mapping is a table the helper walks, so there is none. And for
+`?C?LCASE` the displayed switch value is `R6:R7` only, since a 32-bit value cannot fit a 16-bit code
+address; its destinations are still exact.
+
+If the extension cannot be installed, the helper is marked no-return instead, which stops the table
+being read as code but shows no switch.
+
 ## Not case helpers
 
 Two nearby routines also pop their return address to read inline data, and must not be confused

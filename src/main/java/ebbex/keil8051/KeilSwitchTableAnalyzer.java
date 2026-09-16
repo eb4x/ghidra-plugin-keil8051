@@ -11,6 +11,7 @@ import ghidra.app.services.AbstractAnalyzer;
 import ghidra.app.services.AnalysisPriority;
 import ghidra.app.services.AnalyzerType;
 import ghidra.app.util.importer.MessageLog;
+import ghidra.program.database.SpecExtension;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.address.AddressSetView;
@@ -102,7 +103,7 @@ public class KeilSwitchTableAnalyzer extends AbstractAnalyzer {
 		int cases = 0;
 		for (Map.Entry<Address, KeilCaseHelper> helper : helpers.entrySet()) {
 			monitor.checkCancelled();
-			prepareHelper(program, helper.getKey(), helper.getValue());
+			prepareHelper(program, helper.getKey(), helper.getValue(), log);
 			for (Address site : findCallSites(program, helper.getKey(), monitor)) {
 				monitor.checkCancelled();
 				KeilCaseTable table = applyTable(program, site, helper.getValue(), targets, monitor);
@@ -123,7 +124,7 @@ public class KeilSwitchTableAnalyzer extends AbstractAnalyzer {
 	}
 
 	/** Locates every copy of every case helper. Banked images carry one copy per bank. */
-	private Map<Address, KeilCaseHelper> findHelpers(Program program, TaskMonitor monitor)
+	static Map<Address, KeilCaseHelper> findHelpers(Program program, TaskMonitor monitor)
 			throws CancelledException {
 
 		Memory memory = program.getMemory();
@@ -144,7 +145,7 @@ public class KeilSwitchTableAnalyzer extends AbstractAnalyzer {
 	}
 
 	/** Every {@code LCALL <helper>} in the image, by byte pattern. */
-	private List<Address> findCallSites(Program program, Address helper, TaskMonitor monitor)
+	static List<Address> findCallSites(Program program, Address helper, TaskMonitor monitor)
 			throws CancelledException {
 
 		int target = (int) helper.getOffset();
@@ -325,20 +326,26 @@ public class KeilSwitchTableAnalyzer extends AbstractAnalyzer {
 	}
 
 	/**
-	 * Makes the helper a function that <b>does not return</b>, and names it if nobody has.
+	 * Makes the helper a function the decompiler can see a switch through, and names it if nobody
+	 * has.
 	 * <p>
-	 * The no-return marking is what keeps the decompiler out of the case table. Clearing each call
-	 * site's fall-through fixes the listing only: the decompiler ignores it, treats the call as
-	 * returning, and decodes the table bytes that follow as instructions. Measured on the GL3523 L2
-	 * hub image at 0x8811 — {@code keil_ccase_switch(...); nop(); SFR95 = Var2; SFR88 = Var1 + 1}
-	 * is the table at 0x8814 read as code. The helper pops its own return address and jumps to a
-	 * case, so no-return is simply the truth about it.
+	 * Clearing each call site's fall-through fixes the listing only. The decompiler ignores it,
+	 * treats the call as returning, and decodes the case table after it as instructions — on the
+	 * GL3523 L2 hub image at 0x8811, {@code keil_ccase_switch(...); nop(); SFR95 = Var2;
+	 * SFR88 = Var1 + 1} is the table at 0x8814 read as code.
 	 * <p>
-	 * That marking is applied whether or not the helper already has a name. A session that named it
-	 * by hand before this analyzer ran still needs it, and skipping the whole helper on a user name,
-	 * as an earlier version did, would have left exactly those programs broken.
+	 * So the helper gets a call-fixup (see {@link KeilCaseHelper#fixupBody()}): every call to it is
+	 * replaced by an indirect branch, which {@link KeilSwitchOverrideAnalyzer} then gives the case
+	 * destinations through a jump-table override at the call site. With a lone branch injected the
+	 * table bytes are no longer decoded, and the decompiler shows a real switch. If the fixup
+	 * cannot be installed, the fallback is to mark the helper no-return: that shows no switch, but
+	 * it does stop the table being read as code, and no-return is the truth about the helper.
+	 * <p>
+	 * All of that is applied whether or not the helper already has a name. A session that named it
+	 * by hand still needs it; only the name and plate comment are left to them.
 	 */
-	private void prepareHelper(Program program, Address at, KeilCaseHelper helper) {
+	private void prepareHelper(Program program, Address at, KeilCaseHelper helper,
+			MessageLog log) {
 		AddressSet body = new AddressSet(at, at.add(helper.signature().length - 1));
 		new DisassembleCommand(body, null, true).applyTo(program, TaskMonitor.DUMMY);
 		if (program.getFunctionManager().getFunctionAt(at) == null) {
@@ -346,8 +353,8 @@ public class KeilSwitchTableAnalyzer extends AbstractAnalyzer {
 				.applyTo(program, TaskMonitor.DUMMY);
 		}
 		Function function = program.getFunctionManager().getFunctionAt(at);
-		if (function != null && !function.hasNoReturn()) {
-			function.setNoReturn(true);
+		if (function != null) {
+			bindFixup(program, function, helper, log);
 		}
 
 		SymbolTable symbols = program.getSymbolTable();
@@ -363,6 +370,33 @@ public class KeilSwitchTableAnalyzer extends AbstractAnalyzer {
 				"Keil C51 library routine " + helper.keilSymbol() + "\n" +
 					"Pops its return address to find the inline case table that follows each call " +
 					"site, walks it, and jumps to the matching case. Never returns to the caller.");
+		}
+	}
+
+	/** Installs the helper's call-fixup if the program lacks it, and binds it to the helper. */
+	private void bindFixup(Program program, Function function, KeilCaseHelper helper,
+			MessageLog log) {
+		try {
+			if (SpecExtension.getCompilerSpecExtension(program, SpecExtension.Type.CALL_FIXUP,
+				helper.label()) == null) {
+				new SpecExtension(program).addReplaceCompilerSpecExtension(
+					helper.fixupExtension(), TaskMonitor.DUMMY);
+			}
+			if (!helper.label().equals(function.getCallFixup())) {
+				function.setCallFixup(helper.label());
+			}
+			// The injected branch keeps the decompiler out of the table; no-return would now only
+			// hide the switch the fixup exists to show.
+			if (function.hasNoReturn()) {
+				function.setNoReturn(false);
+			}
+		}
+		catch (Exception e) {
+			log.appendMsg("Keil C51: could not install the " + helper.keilSymbol() +
+				" call-fixup, marking it no-return instead: " + e.getMessage());
+			if (!function.hasNoReturn()) {
+				function.setNoReturn(true);
+			}
 		}
 	}
 }

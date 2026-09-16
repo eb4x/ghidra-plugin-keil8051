@@ -33,17 +33,17 @@ package ebbex.keil8051;
 public enum KeilCaseHelper {
 
 	/** {@code ?C?CCASE} — {@code char}-sized cases; switch value in A, compared with {@code XRL A,R0}. */
-	CCASE("keil_ccase_switch", "?C?CCASE", 1,
+	CCASE("keil_ccase_switch", "?C?CCASE", 1, "local t:2 = zext(ACC); goto [t];",
 		"d0 83 d0 82 f8 e4 93 70 12 74 01 93 70 0d a3 a3 93 f8 74 01 93 f5 82 88 83 e4 73" +
 		" 74 02 93 68 60 ef a3 a3 a3 80 df"),
 
 	/** {@code ?C?ICASE} — {@code int}-sized cases; switch value in B:A, high byte compared with {@code CJNE A,B}. */
-	ICASE("keil_icase_switch", "?C?ICASE", 2,
+	ICASE("keil_icase_switch", "?C?ICASE", 2, "local t:2 = (zext(B) << 8) | zext(ACC); goto [t];",
 		"d0 83 d0 82 f8 e4 93 70 12 74 01 93 70 0d a3 a3 93 f8 74 01 93 f5 82 88 83 e4 73" +
 		" 74 02 93 b5 f0 06 74 03 93 68 60 e9 a3 a3 a3 a3 80 d8"),
 
 	/** {@code ?C?LCASE} — {@code long}-sized cases; switch value in R4..R7, compared byte by byte. */
-	LCASE("keil_lcase_switch", "?C?LCASE", 4,
+	LCASE("keil_lcase_switch", "?C?LCASE", 4, "local t:2 = (zext(R6) << 8) | zext(R7); goto [t];",
 		"d0 83 d0 82 e4 93 70 12 74 01 93 70 0d a3 a3 93 f8 74 01 93 f5 82 88 83 e4 73" +
 		" 74 02 93 6c 70 12 74 03 93 6d 70 0c 74 04 93 6e 70 06 74 05 93 6f 60 dd" +
 		" a3 a3 a3 a3 a3 a3 80 ca");
@@ -54,12 +54,15 @@ public enum KeilCaseHelper {
 	private final String label;
 	private final String keilSymbol;
 	private final int valueSize;
+	private final String fixupBody;
 	private final byte[] signature;
 
-	KeilCaseHelper(String label, String keilSymbol, int valueSize, String signatureHex) {
+	KeilCaseHelper(String label, String keilSymbol, int valueSize, String fixupBody,
+			String signatureHex) {
 		this.label = label;
 		this.keilSymbol = keilSymbol;
 		this.valueSize = valueSize;
+		this.fixupBody = fixupBody;
 		this.signature = parseHex(signatureHex);
 	}
 
@@ -90,6 +93,28 @@ public enum KeilCaseHelper {
 	/** Size of one table entry: a 2-byte target plus the case value. */
 	public int entrySize() {
 		return 2 + valueSize;
+	}
+
+	/**
+	 * The call-fixup injected in place of every call to this helper: a single indirect branch on
+	 * the switch value.
+	 * <p>
+	 * The decompiler has no notion of a callee that consumes a table inline after its own call
+	 * site. Replacing the call with an indirect branch gives it a switch to recover, and a
+	 * jump-table override keyed at the call site then supplies the destinations. The branch
+	 * target expression is there for the rendering only — the override decides where it goes —
+	 * so it names the register the helper actually switches on: A for {@code char}, B:A for
+	 * {@code int}. A {@code long} value is 32 bits and a code address 16, so {@code ?C?LCASE}
+	 * can only show R6:R7, its low half.
+	 */
+	public String fixupBody() {
+		return fixupBody;
+	}
+
+	/** The call-fixup as a compiler-spec extension document, named after {@link #label()}. */
+	public String fixupExtension() {
+		return "<callfixup name=\"" + label + "\"><pcode><body><![CDATA[ " + fixupBody +
+			" ]]></body></pcode></callfixup>";
 	}
 
 	/** The library body used to recognise the helper in an image without symbols. */

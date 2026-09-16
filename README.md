@@ -39,7 +39,7 @@ explicit offsets.
 | `Keil8051VectorAnalyzer` | BYTE, `FORMAT_ANALYSIS.after()` | Seeds functions at the reset vector (image base) and the interrupt vectors at base+0x03, +0x0b, +0x13, … so analysis has entry points at all. |
 | `KeilSwitchTableAnalyzer` | INSTRUCTION, `CODE_ANALYSIS.before()` | Recovers the inline case tables that follow `LCALL ?C?CCASE` / `?C?ICASE` / `?C?LCASE`. |
 | `KeilJumpTableAnalyzer` | INSTRUCTION, `CODE_ANALYSIS.before()` | Recovers Keil's bounded `AJMP`-table switches, reading the case count from the compiler's own range check. |
-| `KeilSwitchOverrideAnalyzer` | INSTRUCTION, `FUNCTION_ANALYSIS.after()` | Writes the decompiler jump-table override for those switches — only where the decompiler cannot recover the table on its own. |
+| `KeilSwitchOverrideAnalyzer` | INSTRUCTION, `FUNCTION_ANALYSIS.after()` | Writes decompiler jump-table overrides: at every `?C?xCASE` call site, and at `AJMP` switches only where the decompiler cannot recover the table on its own. |
 
 Both set `setSupportsOneTimeAnalysis()`, so they can be re-run from **Analysis → One Shot** on an
 already-analyzed program, and both are idempotent.
@@ -75,6 +75,17 @@ Three helpers, differing only in how wide a case value is:
 | `?C?LCASE` | 4 bytes (`long`) | 6 |
 
 **The target comes first and the value second** — the ordering that is easy to get backwards.
+
+**The decompiler needs more than the listing.** It ignores a call site's fall-through, so on its own
+it treats the helper as a call that returns and decodes the table after it as instructions. The
+analyzer therefore gives each helper a **call-fixup** — a compiler-spec extension that replaces every
+call to it with an indirect branch on the switch value — and `KeilSwitchOverrideAnalyzer` puts a
+jump-table override with the case destinations at each call site. The decompiler then shows a real
+`switch`, e.g. `switch(DAT_INTMEM_6c)` at `0x8811` in the GL3523 L2 hub image. Case labels come out as
+addresses rather than values: an override carries destinations only, and the value-to-target mapping
+lives in a table the helper walks at run time, which no analysis can follow. If the fixup cannot be
+installed, the helper is marked no-return instead, which stops the table being read as code but
+shows no switch.
 
 Case targets are labelled `caseD_<value>` but deliberately *not* turned into functions: they are
 blocks inside the switch's own function, and splitting them out would fragment it and cost the

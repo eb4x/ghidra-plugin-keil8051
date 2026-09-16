@@ -149,35 +149,39 @@ public class KeilSwitchTableAnalyzerTest extends AbstractGenericTest {
 	}
 
 	/**
-	 * The decompiler must not read the inline case table as code.
+	 * The decompiler shows the switch, and does not read the inline case table as code.
 	 * <p>
-	 * Fixing the listing is not enough. On the real image, with the fall-through cleared and every
+	 * Fixing the listing was not enough. On the real image, with the fall-through cleared and every
 	 * case reference in place, the decompiler still treated {@code keil_ccase_switch} as a call
 	 * that returns and decoded the table bytes at 0x8814 as instructions —
-	 * {@code nop(); UNK_SFR_95 = uVar2; TCON = cVar1 + '\x01'; ...} — because it ignores the
-	 * listing's fall-through and never reached a switch at all. That went unnoticed because no
-	 * function contained 0x8811 to decompile: its entry, 0x8800, is reached only indirectly.
+	 * {@code nop(); SFR95 = Var2; SFR88 = Var1 + 1; ...}. It went unnoticed because no function
+	 * contained 0x8811: its entry, 0x8800, is reached only indirectly.
 	 * <p>
-	 * The check is on addresses rather than on which garbage appears: no p-code in the decompiled
-	 * function may come from inside the table.
+	 * The helper's call-fixup turns each call into an indirect branch on A, and the override at the
+	 * call site gives it the destinations. This checks the decompiler itself, not the listing: a
+	 * jump table at the call site with exactly the ten destinations, a switch on the real switch
+	 * value, and no p-code from inside the table.
 	 */
 	@Test
-	public void theDecompilerDoesNotReadTheCaseTableAsCode() throws Exception {
+	public void theDecompilerShowsTheSwitchAndNotTheTable() throws Exception {
 		// The real prologue at 0x8800: load the switch value and parameters from IDATA, then the
 		// LCALL ?C?CCASE at 0x8811 that setUp already placed.
 		builder.setBytes("0x8800", "ac 6e 85 6c 48 aa 6f e4 f9 ec 75 4a 00 f5 49 e5 48");
 		assertTrue(analyze());
 		builder.disassemble("0x8800", 0x14);
 
-		int txId = program.startTransaction("function");
+		int txId = program.startTransaction("function and override");
 		try {
 			new ghidra.app.cmd.function.CreateFunctionCmd("switch_function", builder.addr("0x8800"),
 				null, SourceType.ANALYSIS).applyTo(program, TaskMonitor.DUMMY);
+			assertTrue(new KeilSwitchOverrideAnalyzer().added(program, new AddressSet(),
+				TaskMonitor.DUMMY, new MessageLog()));
 		}
 		finally {
 			program.endTransaction(txId, true);
 		}
 
+		Address call = builder.addr("0x8811");
 		Address tableStart = builder.addr("0x8814");
 		Address tableEnd = builder.addr("0x8836");      // exclusive: 0x8836 is case 0x04's body
 		ghidra.app.decompiler.DecompInterface decompiler =
@@ -188,6 +192,7 @@ public class KeilSwitchTableAnalyzerTest extends AbstractGenericTest {
 				program.getFunctionManager().getFunctionAt(builder.addr("0x8800")), 30,
 				TaskMonitor.DUMMY);
 			assertTrue(results.decompileCompleted());
+			String c = results.getDecompiledFunction().getC();
 
 			List<Address> fromTable = new ArrayList<>();
 			var ops = results.getHighFunction().getPcodeOps();
@@ -197,11 +202,45 @@ public class KeilSwitchTableAnalyzerTest extends AbstractGenericTest {
 					fromTable.add(at);
 				}
 			}
-			assertTrue("the case table was decompiled as code, at " + fromTable + ":\n" +
-				results.getDecompiledFunction().getC(), fromTable.isEmpty());
+			assertTrue("the case table was decompiled as code, at " + fromTable + ":\n" + c,
+				fromTable.isEmpty());
+
+			Set<Address> cases = null;
+			for (var table : results.getHighFunction().getJumpTables()) {
+				if (call.equals(table.getSwitchAddress())) {
+					cases = new HashSet<>(List.of(table.getCases()));
+				}
+			}
+			assertNotNull("no switch recovered at the call site:\n" + c, cases);
+			Set<Address> expected = new HashSet<>();
+			for (String t : new String[] { "0x8b29", "0x8836", "0x8995", "0x8861", "0x889c",
+				"0x88f8", "0x8b0e", "0x8840", "0x8b1d", "0x8b2b" }) {
+				expected.add(builder.addr(t));
+			}
+			assertEquals("nine distinct case bodies plus the default", expected, cases);
+			assertTrue("the switch is on A, loaded from DAT_INTMEM_6c by the prologue:\n" + c,
+				c.contains("switch(DAT_INTMEM_6c)"));
 		}
 		finally {
 			decompiler.dispose();
+		}
+	}
+
+	/** Every helper's fixup snippet must compile against the 8051 language, not just CCASE's. */
+	@Test
+	public void everyHelpersCallFixupCompiles() throws Exception {
+		for (KeilCaseHelper helper : KeilCaseHelper.values()) {
+			int txId = program.startTransaction("fixup " + helper);
+			try {
+				new ghidra.program.database.SpecExtension(program)
+					.addReplaceCompilerSpecExtension(helper.fixupExtension(), TaskMonitor.DUMMY);
+			}
+			finally {
+				program.endTransaction(txId, true);
+			}
+			assertNotNull(helper + " fixup should be installed",
+				ghidra.program.database.SpecExtension.getCompilerSpecExtension(program,
+					ghidra.program.database.SpecExtension.Type.CALL_FIXUP, helper.label()));
 		}
 	}
 
