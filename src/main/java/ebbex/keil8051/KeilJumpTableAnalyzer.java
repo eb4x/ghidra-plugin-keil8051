@@ -127,8 +127,7 @@ public class KeilJumpTableAnalyzer extends AbstractAnalyzer {
 		int removed = removeFabricatedCases(program, table);
 
 		for (KeilJumpTable.Entry entry : table.entries()) {
-			references.addMemoryReference(table.jump(), entry.address(), RefType.COMPUTED_JUMP,
-				SourceType.ANALYSIS, 0);
+			addComputedJump(references, table.jump(), entry.address());
 			label(symbols, entry.address(), "caseD_" + Integer.toHexString(entry.caseValue()));
 			targets.addRange(entry.address(), entry.address());
 		}
@@ -141,6 +140,25 @@ public class KeilJumpTableAnalyzer extends AbstractAnalyzer {
 			"Keil AJMP switch: " + table.entries().size() + " cases, table at " + table.address() +
 				", ends " + table.end());
 		return removed;
+	}
+
+	/**
+	 * Adds the case reference unless the branch already carries one to that target.
+	 * <p>
+	 * A reference is identified by (from, to, type, <i>operand index</i>), so adding one that
+	 * differs only in operand index from an existing reference produces a second reference to the
+	 * same place rather than replacing it. The stock analyzer records its case references against a
+	 * different operand than this analyzer would, so on a branch it had already processed every
+	 * target ended up listed twice — harmless to the decompiler, which reads the override, but it
+	 * doubles xref and caller counts for anyone reading them.
+	 */
+	private void addComputedJump(ReferenceManager references, Address from, Address to) {
+		for (Reference existing : references.getReferencesFrom(from)) {
+			if (existing.getReferenceType().isComputed() && existing.getToAddress().equals(to)) {
+				return;
+			}
+		}
+		references.addMemoryReference(from, to, RefType.COMPUTED_JUMP, SourceType.ANALYSIS, 0);
 	}
 
 	/**

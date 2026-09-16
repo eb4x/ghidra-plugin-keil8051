@@ -259,6 +259,49 @@ public class KeilJumpTableAnalyzerTest extends AbstractGenericTest {
 		assertEquals(hub.addr("0xbd49"), table.entries().get(27).target());
 	}
 
+	/**
+	 * A branch the stock analyzer already processed correctly.
+	 * <p>
+	 * References are identified by (from, to, type, <b>operand index</b>), so adding one that
+	 * differs only in operand index does not replace the existing reference — it adds a second to
+	 * the same target. On the GL3523 L2 hub's 0xa81c, `hp-z27k-g3` found every one of the 8 slots
+	 * listed twice for exactly that reason. Harmless to the decompiler, which reads the override,
+	 * but it doubles xref and caller counts for anyone reading them.
+	 */
+	@Test
+	public void doesNotDoubleReferencesTheBranchAlreadyHas() throws Exception {
+		// The stock analyzer's refs: correct targets, but recorded against the mnemonic.
+		int txId = program.startTransaction("stock refs");
+		try {
+			builder.disassemble("0xbd5d", 13);
+			for (String slot : new String[] { "0xbd6b", "0xbd6d", "0xbd6f", "0xbd71", "0xbd73",
+				"0xbd75", "0xbd77", "0xbd79", "0xbd7b" }) {
+				program.getReferenceManager().addMemoryReference(builder.addr("0xbd6a"),
+					builder.addr(slot), RefType.COMPUTED_JUMP, SourceType.ANALYSIS,
+					ghidra.program.model.listing.CodeUnit.MNEMONIC);
+			}
+		}
+		finally {
+			program.endTransaction(txId, true);
+		}
+		assertEquals("precondition", 9, countBd6aComputedRefs());
+
+		analyze();
+
+		assertEquals("each slot must still be referenced exactly once", 9, countBd6aComputedRefs());
+	}
+
+	private int countBd6aComputedRefs() {
+		int count = 0;
+		for (Reference ref : program.getReferenceManager()
+				.getReferencesFrom(builder.addr("0xbd6a"))) {
+			if (ref.getReferenceType().isComputed()) {
+				count++;
+			}
+		}
+		return count;
+	}
+
 	@Test
 	public void rerunIsIdempotent() throws Exception {
 		analyze();
