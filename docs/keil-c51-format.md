@@ -179,6 +179,14 @@ targets)`, and no `pcode error` in the application log at all. `vendor_req_A1_is
 decompiles to a nine-case `switch` under `if (bVar1 < 9)` instead of the 129-case listing full of
 `halt_baddata()`.
 
+Independently confirmed by `hp-z27k-g3` on its hand-curated L2 program, running both one-shots in
+order: nine cases under `if (bVar1 < 9)`, "Switch is manually overridden", no `halt_baddata()`,
+override `CONSUMED (9 cases -> 9 distinct targets)`, and its own names and comments intact through
+both passes. The recovered cases turned out to be readable semantics for the hub's ISP-mode vendor
+request — wValue lo 0 leaves ISP, 1 enters it, 3/5/6 flip boot flags in XDATA `0x06ff`, 7/8 send a
+DDC/CI write frame with op `0xf6` — which that session had previously only characterised from
+observed USB traffic.
+
 The main scaler module contains **no** `JMP @A+DPTR` at all, so this idiom is not what limits it to
 65 functions in 64 KB. Whatever reaches the rest of that module, it is not a Keil `AJMP` switch.
 
