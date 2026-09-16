@@ -1,11 +1,11 @@
 package ebbex.keil8051;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
+import ghidra.app.util.MemoryBlockUtils;
 import ghidra.app.util.Option;
 import ghidra.app.util.bin.ByteProvider;
 import ghidra.app.util.importer.MessageLog;
@@ -17,8 +17,8 @@ import ghidra.app.util.opinion.LoaderTier;
 import ghidra.framework.model.DomainObject;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.lang.LanguageCompilerSpecPair;
+import ghidra.program.database.mem.FileBytes;
 import ghidra.program.model.listing.Program;
-import ghidra.program.model.mem.MemoryBlock;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
 
@@ -175,7 +175,15 @@ public class MStarModuleLoader extends AbstractProgramLoader {
 			"an existing program");
 	}
 
-	/** Builds one program: a single initialized CODE block holding the module's bytes at 0. */
+	/**
+	 * Builds one program: a single initialized {@code CODE} block holding the module's bytes at 0.
+	 * <p>
+	 * The block is backed by {@link FileBytes} covering the <i>whole</i> image, not just the
+	 * module's slice, so that {@code Memory.locateAddressesForFileOffset} answers with true file
+	 * offsets — asking where file offset {@code 0x108000} went gets {@code CODE:0000} of the module
+	 * that came from there. Recording only the slice would make its offsets module-relative and the
+	 * mapping useless, which is the whole reason for keeping them.
+	 */
 	private Program createModuleProgram(MStarModule module, ImporterSettings settings)
 			throws IOException, CancelledException {
 
@@ -186,14 +194,13 @@ public class MStarModuleLoader extends AbstractProgramLoader {
 
 		boolean success = false;
 		int txId = program.startTransaction("load module");
-		try (InputStream bytes = settings.provider().getInputStream(module.offset())) {
-			MemoryBlock block = program.getMemory().createInitializedBlock(BLOCK_NAME, base, bytes,
-				module.length(), monitor, false);
-			// Match what Raw Binary gives an 8051 code image: this block is the code space.
-			block.setRead(true);
-			block.setWrite(true);
-			block.setExecute(true);
-			block.setComment("8051 module from file offset 0x%x".formatted(module.offset()));
+		try {
+			FileBytes fileBytes =
+				MemoryBlockUtils.createFileBytes(program, settings.provider(), monitor);
+			MemoryBlockUtils.createInitializedBlock(program, false, BLOCK_NAME, base, fileBytes,
+				module.offset(), module.length(),
+				"8051 module from file offset 0x%x".formatted(module.offset()), LOADER_NAME,
+				true, true, true, log);
 			// Without this every module reports the whole image's file name as its program name,
 			// which makes several modules from one image indistinguishable in any listing of them.
 			program.setName(module.name());
