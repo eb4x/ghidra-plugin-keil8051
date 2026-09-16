@@ -83,8 +83,9 @@ analyzer therefore gives each helper a **call-fixup** — a compiler-spec extens
 call to it with an indirect branch on the switch value — and `KeilSwitchOverrideAnalyzer` puts a
 jump-table override with the case destinations at each call site. The decompiler then shows a real
 `switch`, e.g. `switch(DAT_INTMEM_6c)` at `0x8811` in the GL3523 L2 hub image. Case labels come out as
-addresses rather than values: an override carries destinations only, and the value-to-target mapping
-lives in a table the helper walks at run time, which no analysis can follow. If the fixup cannot be
+the decompiler's unknown-label placeholder, `0xbad1abe1bad1abe1`, rather than values: an override
+carries destinations only, and the value-to-target mapping lives in a table the helper walks at run
+time, which no analysis can follow. The case bodies themselves are shown in full. If the fixup cannot be
 installed, the helper is marked no-return instead, which stops the table being read as code but
 shows no switch.
 

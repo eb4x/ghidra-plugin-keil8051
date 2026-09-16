@@ -106,6 +106,12 @@ public enum KeilCaseHelper {
 	 * so it names the register the helper actually switches on: A for {@code char}, B:A for
 	 * {@code int}. A {@code long} value is 32 bits and a code address 16, so {@code ?C?LCASE}
 	 * can only show R6:R7, its low half.
+	 * <p>
+	 * This costs the case labels, which become the decompiler's placeholder
+	 * {@code 0xbad1abe1bad1abe1}, since a narrow switch variable cannot range over 16-bit
+	 * addresses. Branching on {@code DPTR} instead would label each case with its address, but the
+	 * decompiler would see DPTR used unset and add a bogus parameter to the function's prototype,
+	 * which then misleads every caller. A placeholder label misleads nobody.
 	 */
 	public String fixupBody() {
 		return fixupBody;

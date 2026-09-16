@@ -36,9 +36,11 @@ import ghidra.util.task.TaskMonitor;
  * <b>{@code ?C?xCASE} switches</b> always get one. {@link KeilSwitchTableAnalyzer} replaces each
  * call to a case helper with an injected indirect branch, but the value-to-target mapping lives
  * in a table the helper walks at run time, which no data-flow analysis can follow; the override at
- * the call site is the only way the decompiler learns the cases. Case labels come out as addresses:
- * a {@code basicoverride} carries destinations and cannot carry values, and there is no arithmetic
- * path from the switch variable to the target for the decompiler to derive them from.
+ * the call site is the only way the decompiler learns the cases. Case labels come out as the
+ * decompiler's unknown-label placeholder, {@code 0xbad1abe1bad1abe1}: a {@code basicoverride}
+ * carries destinations and cannot carry values, and there is no arithmetic path from the switch
+ * variable to the target for the decompiler to derive them from. See
+ * {@link KeilCaseHelper#fixupBody()} for why that is preferred to address labels.
  * <p>
  * <b>{@code AJMP} jump tables</b> get one only where the decompiler cannot work them out itself.
  * <p>

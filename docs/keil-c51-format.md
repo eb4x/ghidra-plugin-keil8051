@@ -127,15 +127,36 @@ The fix, settled with `dailydriver` as extension territory rather than core:
 Result, verified by a unit test running the real decompiler on these bytes:
 
 ```
-switch(DAT_INTMEM_6c) {        <- the value the prologue loaded into A
-case 0x8836: ...               <- ten destinations: nine case bodies and the default 0x8b2b
+switch(DAT_INTMEM_6c) {           <- the value the prologue loaded into A
+case 0xbad1abe1bad1abe1: ...      <- ten destinations: nine case bodies and the default 0x8b2b
 ```
 
-Two limits. Case labels are **addresses**, not the case values: a `basicoverride` carries
-destinations only, and it can derive values only by emulating a data-flow path from the switch
-variable to the branch — here the mapping is a table the helper walks, so there is none. And for
-`?C?LCASE` the displayed switch value is `R6:R7` only, since a 32-bit value cannot fit a 16-bit code
-address; its destinations are still exact.
+Verified live on 12.1.3 as well as in the unit test: function `0x8800` decompiles end to end, the
+override reports `CONSUMED (10 cases -> 10 distinct targets)`, and the AJMP dispatch nested in case 5
+at `0x89b6` is now reached and recovered by the decompiler itself as `switch(bVar6)` with cases
+`0`..`10`. `hp-z27k-g3` confirmed the same on its curated program, where `0x8800` turned out to be
+the USB3 EP0 setup-request handler dispatching on `wValueL`.
+
+**Case labels are the decompiler's unknown-label placeholder, `0xbad1abe1bad1abe1`**, not the case
+values. A `basicoverride` carries destinations only; it can derive labels only by emulating a
+data-flow path from the switch variable to the branch, and here the mapping is a table the helper
+walks, so there is none. What it shows instead depends on the injected branch expression, which
+is a trade-off:
+
+- `goto [DPTR]` gives labels that are the case **addresses** (`case 0x8836:`) — but the decompiler
+  sees DPTR used without being set and invents a parameter for it, so the function's **prototype**
+  gains a bogus `unkbyte2 param_1` that propagates to every caller.
+- `local t:2 = zext(ACC); goto [t];` gives the **real switch variable**, `switch(DAT_INTMEM_6c)`,
+  and a clean prototype — but a 1-byte variable cannot range over 16-bit addresses, so every label
+  becomes the placeholder.
+
+This extension uses the second. A wrong prototype misleads everywhere the function is called; a
+placeholder label misleads nobody, and the case bodies are shown inline under it regardless. (An
+earlier version of this document claimed the labels came out as addresses. That was true of the
+first spike, which injected `goto [DPTR]`, and was not re-checked when the injection changed.)
+
+And for `?C?LCASE` the displayed switch value is `R6:R7` only, since a 32-bit value cannot fit a
+16-bit code address; its destinations are still exact.
 
 If the extension cannot be installed, the helper is marked no-return instead, which stops the table
 being read as code but shows no switch.
