@@ -81,6 +81,12 @@ Restart Ghidra after installing for the new build to load.
 
 ## Status
 
-Banked-code support (overlay blocks per bank plus bank-switch stubs resolved into thunks, so
-cross-bank calls and xrefs work) is the next feature and is **not implemented**: the bank-switch
-mechanism on the target MStar scaler image has not been decoded yet, and it will not be guessed.
+**Banked-code support is not needed on the known targets, and is not implemented.** The premise —
+that the 1.26 MB MStar scaler image uses software bank switching that an analyzer could resolve
+into thunks — was investigated and disproved: there is no bank-switch trampoline and no bank latch
+in that firmware. It is several independent, self-contained ≤64 KB 8051 images at arbitrary flash
+offsets, and the window switching is done by the chip's flash-remap registers. See
+`docs/keil-c51-format.md` for the evidence and the corrected module map.
+
+What that target would actually benefit from is import-time support for splitting such a flash
+image into its modules. That is not built yet.

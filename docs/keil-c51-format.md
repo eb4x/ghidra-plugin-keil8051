@@ -110,13 +110,47 @@ with the case helpers:
 - scaler `0x271b` / `0x2734` — inline-constant loaders (read 5 bytes into `@R0`, then `JMP @A+DPTR`).
 - hub `0xd19f`, L1 hub `0xc792` — `POP DPH; POP DPL; POP ACC; RET`.
 
-## Banked code — NOT decoded
+## "Banked" code — there is no software bank switching
 
-The MStar scaler image is banked: common code at `0x0000-0x7fff`, a switched 32 KiB window at
-`0x8000-0xffff`, total bank count unknown. The bank-switch mechanism has **not** been decoded —
-it is not known whether it is Keil `?B_SWITCH`/`?C?BANK` style or MStar-specific, which SFR or
-XDATA latch selects a bank, or how the bank and target are passed. The boot stub writes XDATA
-`0x38a`, `0x393`, `0x3a6`, `0xf80`, `0xfb4`, which look like MStar code-remap/MIU registers rather
-than a Keil bank latch.
+Investigated and **disproved**. The MStar (MST9U) scaler image is not banked in any sense an
+extension can help with, and the overlay-block-per-bank plus bank-switch-stub model — the obvious
+port of rtlink's DOS-overlay playbook — buys nothing here, because there are no stubs.
 
-Nothing in this extension guesses at it. Ground truth first.
+Established by `hp-z27k-g3` in Ghidra:
+
+- An image-wide search for the Keil banked-call shape `d0 83 d0 82` finds **only** inline-constant
+  loaders. In the main firmware at code `0x0465` and `0x047e`: both pop the return address, `MOVC`
+  four bytes out of code space into IDATA/XDATA, and resume at return+4 via `MOV A,#4; JMP @A+DPTR`.
+  Raw bytes at `0x0465`: `d0 83 d0 82 e4 93 f6 08 74 01 93 f6 08 74 02 93 f6 08 74 03 93 f6 74 04 73`.
+  The `0x047e` variant swaps DPTR with B:R0 and calls a one-byte copy loop at `0x0495`. The same
+  pair exists in the other module at `0x24b7`-`0x24cd`.
+- Neither writes any SFR or XDATA bank latch; neither changes the code window. No bank number is
+  passed anywhere, there is no inline `{bank, hi, lo}` descriptor, and no `?B_SWITCH`-style thunk.
+- Each module is a self-contained ≤64 KB 8051 image (`0x0000`-`0xffff`) using plain `LCALL`/`LJMP`
+  across the `0x8000` boundary.
+
+The window switching is done **by the chip**, not by the code: the stub at file offset 0 programs
+MStar flash-remap/MIU registers (XDATA `0x38a` bit 7, `0x393` = `0x5f`, `0x3a6` = `0x0e`,
+`0xf80` = `0x1f`, `0xfb4` = 0) to select which 64 KB window the 8051 core sees.
+
+### Module map of the 1.26 MB image
+
+| file offset | what |
+| --- | --- |
+| `0x00000` | boot stub: programs the remap registers, then `SJMP $` |
+| `0x1ffe0` | sBoot marker `MSVC0000S3\0SBT_YYMMDD...` |
+| `0x20080-0x30080` | **main scaler firmware**, 64 KB; 8051 vector table right at `0x20080` (LJMPs at +0x00/+0x03/+0x0b/+0x13/+0x1b/+0x23) |
+| `0x30080-0x40080` | EIM2xx panel variant, a second 64 KB copy |
+| `0x100000`, `0x108000`, `0x110000` | a separate, self-contained USB-C Power Delivery / DisplayPort alt-mode module (VDM command-name string table at its code `0x4c7f`: `DiscoverID`, `DiscoverSVID`, `EnterMode`, `DPStatus`, `DPConfig`) |
+| chunks 9-28, 36-39 | compressed resources |
+| `0x118000` | mixed 8051 + ARM Thumb blob |
+
+An earlier description of this image as "32 KiB common at `0x0000`-`0x7fff` plus a switched window
+at `0x8000`-`0xffff`" was wrong and has been retracted by its author. Do not build on it.
+
+### What would actually help
+
+Import-time support for **one flash image containing several independent ≤64 KB 8051 images at
+arbitrary offsets** — pick offset and length, optionally a second copy — plus vector seeding at
+each module's own base. `Keil8051VectorAnalyzer` already handles the second half, because its
+offsets are relative to the image base rather than to absolute zero.

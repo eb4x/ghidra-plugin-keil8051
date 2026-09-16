@@ -104,7 +104,7 @@ public class KeilSwitchTableAnalyzer extends AbstractAnalyzer {
 			nameHelper(program, helper.getKey(), helper.getValue());
 			for (Address site : findCallSites(program, helper.getKey(), monitor)) {
 				monitor.checkCancelled();
-				KeilCaseTable table = applyTable(program, site, helper.getValue(), targets);
+				KeilCaseTable table = applyTable(program, site, helper.getValue(), targets, monitor);
 				if (table != null) {
 					tables++;
 					cases += table.cases().size();
@@ -169,23 +169,29 @@ public class KeilSwitchTableAnalyzer extends AbstractAnalyzer {
 	/**
 	 * Applies one call site, or returns {@code null} when it is not really a switch.
 	 * <p>
-	 * The site must carry a disassembled {@code LCALL} — a byte match inside data parses as a table
-	 * often enough to matter, and requiring the instruction is what rules those out. Sites whose
-	 * {@code LCALL} has not been reached yet are picked up on a later pass, which is why this
-	 * analyzer is instruction-driven.
+	 * A call site does <i>not</i> have to have been reached by flow yet. On these images it usually
+	 * has not been: the GL3523 hub switch at {@code 0x8811} sits in a region auto-analysis never
+	 * reaches from the interrupt vectors, and recovering its table is precisely what makes that
+	 * region reachable. Waiting for the disassembler to arrive first would mean never recovering the
+	 * tables that matter most.
+	 * <p>
+	 * What stands in for that evidence is the table itself. Every entry's target must land in loaded
+	 * memory and the table must reach its zero terminator — for the ten-entry table at {@code 0x8814}
+	 * that is ten independent constraints, which random data does not satisfy. Only once the table
+	 * parses is the {@code LCALL} disassembled.
 	 */
 	private KeilCaseTable applyTable(Program program, Address site, KeilCaseHelper helper,
-			AddressSet targets) {
+			AddressSet targets, TaskMonitor monitor) {
 
 		Listing listing = program.getListing();
-		Instruction call = listing.getInstructionAt(site);
-		if (call == null || call.getLength() != LCALL_LENGTH) {
-			return null;
-		}
-
 		Address tableAddress = site.add(LCALL_LENGTH);
 		KeilCaseTable table = KeilCaseTable.parse(program.getMemory(), helper, tableAddress);
 		if (table == null) {
+			return null;
+		}
+
+		Instruction call = instructionAt(program, listing, site, monitor);
+		if (call == null || call.getLength() != LCALL_LENGTH) {
 			return null;
 		}
 		if (isAlreadyApplied(listing, tableAddress)) {
@@ -198,6 +204,24 @@ public class KeilSwitchTableAnalyzer extends AbstractAnalyzer {
 		clearFallThrough(call);
 		comment(listing, call, table);
 		return table;
+	}
+
+	/**
+	 * The {@code LCALL} at a verified site, disassembling it if nothing is defined there yet.
+	 * Defined data is left alone: something else has claimed those bytes and is more likely right.
+	 */
+	private Instruction instructionAt(Program program, Listing listing, Address site,
+			TaskMonitor monitor) {
+
+		Instruction existing = listing.getInstructionAt(site);
+		if (existing != null) {
+			return existing;
+		}
+		if (listing.getDefinedDataContaining(site) != null) {
+			return null;
+		}
+		new DisassembleCommand(site, null, false).applyTo(program, monitor);
+		return listing.getInstructionAt(site);
 	}
 
 	private boolean isAlreadyApplied(Listing listing, Address tableAddress) {

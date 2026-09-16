@@ -52,7 +52,8 @@ public class KeilSwitchTableAnalyzerTest extends AbstractGenericTest {
 			"0x88f8", "0x8b0e", "0x8840", "0x8b1d", "0x8b2b" }) {
 			builder.setBytes(target, "22");
 		}
-		builder.disassemble("0x8811", 3);
+		// Deliberately NOT disassembled: on the real image nothing reaches this call site, which is
+		// exactly the case the analyzer has to handle.
 		program = builder.getProgram();
 	}
 
@@ -84,6 +85,27 @@ public class KeilSwitchTableAnalyzerTest extends AbstractGenericTest {
 		assertTrue("case 0x04 target", jumps.contains(builder.addr("0x8836")));
 		assertTrue("case 0x1e target", jumps.contains(builder.addr("0x8b1d")));
 		assertTrue("default target", jumps.contains(builder.addr("0x8b2b")));
+	}
+
+	@Test
+	public void recoversASiteThatFlowNeverReached() throws Exception {
+		assertNull("precondition: nothing has disassembled the call site",
+			program.getListing().getInstructionAt(builder.addr("0x8811")));
+
+		assertTrue(analyze());
+
+		assertNotNull("the call site itself must end up disassembled",
+			program.getListing().getInstructionAt(builder.addr("0x8811")));
+		assertNotNull("and its case targets with it",
+			program.getListing().getInstructionAt(builder.addr("0x8b1d")));
+	}
+
+	@Test
+	public void recoversASiteFlowAlreadyReached() throws Exception {
+		builder.disassemble("0x8811", 3);
+
+		assertTrue(analyze());
+		assertEquals(10, countJumpRefs());
 	}
 
 	@Test
