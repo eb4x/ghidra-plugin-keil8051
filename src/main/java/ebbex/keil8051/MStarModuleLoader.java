@@ -27,15 +27,17 @@ import ghidra.util.task.TaskMonitor;
  * <p>
  * <b>Why.</b> An MStar scaler image is a 1.26 MB flash dump, and the 8051 code in it is not one
  * program: it is several self-contained modules of at most 64 KB, each addressed from
- * {@code 0x0000}, at arbitrary offsets in the file, separated by compressed resources, {@code 0xff}
- * gaps and an ARM blob. Nothing links them — each has its own vector table and its own copy of the
+ * {@code 0x0000}, at arbitrary offsets in the file, alongside code for other cores entirely — sBoot
+ * and a secure module for the scaler's second RISC core, a Cortex-M3 blob — plus {@code 0xff} gaps
+ * and high-entropy payload. Nothing links them — each has its own vector table and its own copy of the
  * Keil library. Imported flat the image cannot be loaded at all, since the modules would overlap in
  * the 8051's single 16-bit code space; imported as Raw Binary a module at a time, it takes a hand
  * calculation and a file split per module.
  * <p>
  * <b>What this does.</b> It finds the modules by their vector tables and creates one program for
  * each, named from the image's own sBoot firmware ID where there is one
- * ({@code EIM153_020080}). Each program holds a single initialized {@code CODE} block based at
+ * ({@code EIM152_020080} — the embedded ID, which in that image differs from the {@code EIM153}
+ * in its file name). Each program holds a single initialized {@code CODE} block based at
  * {@code 0x0000}, which is where that module's code really runs, so
  * {@link Keil8051VectorAnalyzer} seeds its vectors and the rest of the extension applies unchanged.
  * <p>
@@ -46,9 +48,10 @@ import ghidra.util.task.TaskMonitor;
  * handle it.
  * <p>
  * The offsets can be given explicitly when the scan is wrong; see the {@code Module offsets} option.
- * Detection is a heuristic over headerless data and is expected to be overridden sometimes — an
- * image region can hold 8051-looking bytes without being a module, and the ARM/8051 blob at
- * {@code 0x118000} in the known image is exactly the sort of thing that has to be excluded by hand.
+ * Detection is a heuristic over headerless data and is expected to be overridden sometimes. In the
+ * known image the miss runs the other way from what one might fear: nothing from the non-8051
+ * regions is mistaken for a module, but the USB-PD payload at {@code 0x108000} has no vector table
+ * — it is called, not reset into — so the scan does not find it and it needs an explicit offset.
  */
 public class MStarModuleLoader extends AbstractProgramLoader {
 

@@ -358,7 +358,8 @@ Established by `hp-z27k-g3` in Ghidra:
 - Each module is a self-contained ≤64 KB 8051 image (`0x0000`-`0xffff`) using plain `LCALL`/`LJMP`
   across the `0x8000` boundary.
 
-The window switching is done **by the chip**, not by the code: the stub at file offset 0 programs
+The window switching is done **by the chip**, not by the code: the 8051 reset stub in the first
+`0x88` bytes of the file programs
 MStar flash-remap/MIU registers (XDATA `0x38a` bit 7, `0x393` = `0x5f`, `0x3a6` = `0x0e`,
 `0xf80` = `0x1f`, `0xfb4` = 0) to select which 64 KB window the 8051 core sees.
 
@@ -366,13 +367,22 @@ MStar flash-remap/MIU registers (XDATA `0x38a` bit 7, `0x393` = `0x5f`, `0x3a6` 
 
 | file offset | what |
 | --- | --- |
-| `0x00000` | boot stub: programs the remap registers, then `SJMP $` |
-| `0x1ffe0` | sBoot marker `MSVC0000S3\0SBT_YYMMDD...` |
-| `0x20080-0x30080` | **main scaler firmware**, 64 KB; 8051 vector table right at `0x20080` (LJMPs at +0x00/+0x03/+0x0b/+0x13/+0x1b/+0x23) |
-| `0x30080-0x40080` | EIM2xx panel variant, a second 64 KB copy |
-| `0x100000`, `0x108000`, `0x110000` | a separate, self-contained USB-C Power Delivery / DisplayPort alt-mode module (VDM command-name string table at its code `0x4c7f`: `DiscoverID`, `DiscoverSVID`, `EnterMode`, `DPStatus`, `DPConfig`) |
-| chunks 9-28, 36-39 | compressed resources |
-| `0x118000` | mixed 8051 + ARM Thumb blob |
+| `0x000000-0x000088` | 8051 reset stub: programs the flash-remap/MIU registers, then `SJMP $` |
+| `0x000088-0x020000` | **sBoot**, the dual-image loader for the scaler's second core, "R2" — a 32-register RISC whose instruction set is unidentified (stock or1k, MIPS, PPC, x86, ARM and Thumb all ruled out). Identical across firmware versions; its printf strings are at `0x4960-0x4ad8` |
+| `0x01ffe0` | sBoot marker `MSVC0000S3\0SBT_YYMMDD...`; the info block follows at `0x20000`, with the build date at `+0x70` and the 6-character firmware ID at `+0x78` |
+| `0x020080-0x030080` | **main scaler firmware**, 8051, 64 KB; vector table right at `0x20080` (LJMPs at +0x00/+0x03/+0x0b/+0x13/+0x1b/+0x23) |
+| `0x030080-0x040080` | EIM2xx panel variant, a second 64 KB 8051 copy |
+| `0x0e9ab8-0x0f75f8` | a second R2-core module, HDCP / secure |
+| `0x100000`, `0x108000`, `0x110000` | a separate, self-contained USB-C Power Delivery / DisplayPort alt-mode module, 8051 (VDM command-name string table at its code `0x4c7f`: `DiscoverID`, `DiscoverSVID`, `EnterMode`, `DPStatus`, `DPConfig`) |
+| `0x1199c0-0x11d9c0` | ARM Thumb blob, Cortex-M3, base `0x10000000` |
+| elsewhere, ~790 KiB | unexamined high-entropy payload |
+
+Only the 8051 modules concern this extension; the R2 regions and the Cortex-M3 blob are other
+architectures entirely. This map was corrected by `hp-z27k-g3` after an independent pass by the
+`fwupd` session: an earlier version here called file `0x0-0x20000` "an 8051 boot stub plus padding"
+(only its first `0x88` bytes are), described the high-entropy payload as "compressed resources" (a
+guess, not a finding), and placed a "mixed 8051 + ARM Thumb blob" at `0x118000` (the Thumb blob is
+exactly `0x1199c0-0x11d9c0`). The 8051 module offsets were right and are unchanged.
 
 An earlier description of this image as "32 KiB common at `0x0000`-`0x7fff` plus a switched window
 at `0x8000`-`0xffff`" was wrong and has been retracted by its author. Do not build on it.

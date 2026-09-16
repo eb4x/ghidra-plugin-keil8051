@@ -10,8 +10,9 @@ almost nothing on them. This extension supplies the two pieces that get an image
 
 `MStarModuleLoader` — **MStar 8051 multi-module flash image**. An MStar scaler image is a 1.26 MB
 flash dump, and the 8051 code in it is not one program: it is several self-contained modules of at
-most 64 KB, each addressed from `0x0000`, at arbitrary file offsets, separated by compressed
-resources, `0xff` gaps and an ARM blob. Flat it cannot be loaded at all — the modules would overlap
+most 64 KB, each addressed from `0x0000`, at arbitrary file offsets, alongside code for other
+cores — a loader and a secure module for the scaler's second RISC core, and a Cortex-M3 blob — plus
+`0xff` gaps and unexamined high-entropy payload. Flat it cannot be loaded at all — the modules would overlap
 in the 8051's single 16-bit code space. A module at a time it takes a hand calculation and a file
 split each.
 
