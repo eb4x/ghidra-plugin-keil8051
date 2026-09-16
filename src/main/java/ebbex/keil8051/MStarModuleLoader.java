@@ -54,14 +54,22 @@ public class MStarModuleLoader extends AbstractProgramLoader {
 
 	public static final String LOADER_NAME = "MStar 8051 multi-module flash image";
 
+	/**
+	 * Comma-separated file offsets to load as modules (e.g. {@code 0x20080,0x30080,0x108000}).
+	 * Empty means "use whatever the vector-table scan found".
+	 */
 	private static final String OPTION_OFFSETS = "Module offsets";
-	private static final String OPTION_OFFSETS_HELP =
-		"Comma-separated file offsets to load as modules (e.g. 0x20080,0x30080,0x108000). " +
-			"Leave empty to use the modules found by scanning for 8051 vector tables.";
 
+	/** Bytes to load per module, at most {@code 0x10000} — the whole 8051 code space. */
 	private static final String OPTION_SIZE = "Module size";
-	private static final String OPTION_SIZE_HELP =
-		"Bytes to load per module, at most 0x10000 (the whole 8051 code space).";
+
+	/**
+	 * Every option needs a command-line arg. Ghidra's {@code ProgramLoader} applies options by
+	 * {@link Option#getArg()} alone — it is the {@code analyzeHeadless} path — so an option built
+	 * without one cannot be set from anywhere but the import dialog.
+	 */
+	private static final String ARG_OFFSETS = "-loader-moduleOffsets";
+	private static final String ARG_SIZE = "-loader-moduleSize";
 
 	/** The language every module is loaded with; all of them are plain 8051. */
 	private static final LanguageCompilerSpecPair LANGUAGE =
@@ -108,11 +116,9 @@ public class MStarModuleLoader extends AbstractProgramLoader {
 	public List<Option> getDefaultOptions(ByteProvider provider, LoadSpec loadSpec,
 			DomainObject domainObject, boolean loadIntoProgram, boolean isFsrl) {
 
-		List<Option> options = new ArrayList<>();
-		options.add(new Option(OPTION_OFFSETS, "", String.class, OPTION_OFFSETS_HELP));
-		options.add(new Option(OPTION_SIZE, MStarModule.MAX_MODULE_SIZE, Integer.class,
-			OPTION_SIZE_HELP));
-		return options;
+		return List.of(
+			new Option(OPTION_OFFSETS, "", String.class, ARG_OFFSETS),
+			new Option(OPTION_SIZE, MStarModule.MAX_MODULE_SIZE, Integer.class, ARG_SIZE));
 	}
 
 	@Override

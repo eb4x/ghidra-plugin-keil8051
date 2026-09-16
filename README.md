@@ -22,7 +22,10 @@ itself only when it finds **two or more** modules; one module is Raw Binary's jo
 Detection is by **vector table**, because these images have no header: a reset `LJMP` at the
 module's first byte, plus at least three of the five interrupt vectors holding a jump or a `RETI`.
 That is a heuristic over headerless data and is meant to be overridden — the **Module offsets**
-option takes an explicit list (`0x20080,0x30080,0x108000`) and **Module size** the length.
+option (`-loader-moduleOffsets`) takes an explicit list (`0x20080,0x30080,0x108000`) and
+**Module size** (`-loader-moduleSize`) the length. Both carry a command-line arg because Ghidra's
+`ProgramLoader` applies loader options by `Option.getArg()` alone; an option without one is
+reachable only from the import dialog.
 
 **A module without a vector table will not be found**, and that is not hypothetical: in the known
 image the USB-PD/DP-alt-mode payload at `0x108000` begins `MOV A,#5; MOVX @DPTR,A` and the one at
