@@ -45,6 +45,14 @@ import ghidra.util.task.TaskMonitor;
  * seeding a vector that turns out to be padding costs a stray function, while missing one costs the
  * whole subtree of code it leads to.
  * <p>
+ * <b>Not every 8051 image has a vector table.</b> A module that is called rather than reset into —
+ * the USB-PD payload in the MStar scaler image begins {@code MOV A,#5; MOVX @DPTR,A}, mid-routine —
+ * has ordinary code where its vectors would be, and seeding {@code base+0x03}, {@code +0x0b} and
+ * the rest there invents entry points that do not exist and names them after interrupts they have
+ * nothing to do with. So the interrupt vectors are seeded only when the reset slot actually holds a
+ * jump, which is what a vector table always starts with. Without one, only the module's first byte
+ * is seeded, as a plain {@code entry}: code does start there, and that much is true of any module.
+ * <p>
  * <b>Ordering.</b> {@link AnalysisPriority#FORMAT_ANALYSIS}{@code .after()} — before any
  * code-driven analysis, since everything downstream depends on there being entry points at all.
  */
@@ -61,6 +69,15 @@ public class Keil8051VectorAnalyzer extends AbstractAnalyzer {
 			"derivatives extend the table in the same 8-byte steps.";
 	private static final int DEFAULT_VECTOR_COUNT = 32;
 
+	private static final String OPTION_ASSUME_VECTORS = "Seed vectors without a reset jump";
+	private static final String OPTION_ASSUME_VECTORS_DESC =
+		"Seed the interrupt vectors even when the image does not begin with a jump, i.e. when it " +
+			"has no vector table at all. Off by default, because on such an image those addresses " +
+			"are ordinary code and naming them after interrupts asserts something untrue. Turning " +
+			"it on trades that for reach: on the MStar USB-PD payload it finds about 5% more " +
+			"functions, from entry points that are not really entry points.";
+	private static final boolean DEFAULT_ASSUME_VECTORS = false;
+
 	/** Offset of the first interrupt vector, and the stride between them. */
 	private static final int FIRST_VECTOR = 0x03;
 	private static final int VECTOR_STRIDE = 8;
@@ -68,12 +85,19 @@ public class Keil8051VectorAnalyzer extends AbstractAnalyzer {
 	/** Bytes of a vector slot: an {@code LJMP} is 3, which is what a used slot almost always holds. */
 	private static final int SLOT_SIZE = 3;
 
+	/** The three jump opcodes a reset vector can hold. */
+	private static final int LJMP = 0x02;
+	private static final int SJMP = 0x80;
+	private static final int AJMP_MASK = 0x1f;
+	private static final int AJMP_OPCODE = 0x01;
+
 	/** The classic 8051 interrupt sources, in vector order, for naming. */
 	private static final String[] VECTOR_NAMES = {
 		"int_ext0", "int_timer0", "int_ext1", "int_timer1", "int_serial", "int_timer2"
 	};
 
 	private int vectorCount = DEFAULT_VECTOR_COUNT;
+	private boolean assumeVectors = DEFAULT_ASSUME_VECTORS;
 
 	public Keil8051VectorAnalyzer() {
 		super(NAME, DESCRIPTION, AnalyzerType.BYTE_ANALYZER);
@@ -91,11 +115,14 @@ public class Keil8051VectorAnalyzer extends AbstractAnalyzer {
 	public void registerOptions(Options options, Program program) {
 		options.registerOption(OPTION_VECTOR_COUNT, DEFAULT_VECTOR_COUNT, null,
 			OPTION_VECTOR_COUNT_DESC);
+		options.registerOption(OPTION_ASSUME_VECTORS, DEFAULT_ASSUME_VECTORS, null,
+			OPTION_ASSUME_VECTORS_DESC);
 	}
 
 	@Override
 	public void optionsChanged(Options options, Program program) {
 		vectorCount = options.getInt(OPTION_VECTOR_COUNT, DEFAULT_VECTOR_COUNT);
+		assumeVectors = options.getBoolean(OPTION_ASSUME_VECTORS, DEFAULT_ASSUME_VECTORS);
 	}
 
 	@Override
@@ -107,9 +134,12 @@ public class Keil8051VectorAnalyzer extends AbstractAnalyzer {
 			return false;
 		}
 
+		boolean vectorTable = assumeVectors || hasVectorTable(program, base);
+		int probes = vectorTable ? vectorCount : 0;
+
 		List<Address> seeded = new ArrayList<>();
 		AddressSet toDisassemble = new AddressSet();
-		for (int index = -1; index < vectorCount; index++) {
+		for (int index = -1; index < probes; index++) {
 			monitor.checkCancelled();
 			Address vector = vectorAddress(base, index);
 			if (vector == null || !looksLikeCode(program, vector)) {
@@ -134,7 +164,7 @@ public class Keil8051VectorAnalyzer extends AbstractAnalyzer {
 				continue;
 			}
 			symbols.addExternalEntryPoint(vector);
-			nameVector(program, vector, vectorName(i - 1), monitor);
+			nameVector(program, vector, vectorName(i - 1, vectorTable), monitor);
 			created++;
 		}
 
@@ -178,14 +208,33 @@ public class Keil8051VectorAnalyzer extends AbstractAnalyzer {
 		}
 	}
 
-	private String vectorName(int index) {
+	private String vectorName(int index, boolean vectorTable) {
 		if (index < 0) {
-			return "reset";
+			// Calling it "reset" would assert a vector table this image does not have.
+			return vectorTable ? "reset" : "entry";
 		}
 		if (index < VECTOR_NAMES.length) {
 			return VECTOR_NAMES[index];
 		}
 		return "int_vector_" + index;
+	}
+
+	/**
+	 * True when the image really begins with a vector table, i.e. its first byte is a jump. Every
+	 * 8051 reset vector is one — there are only three bytes before the first interrupt vector, so
+	 * there is nothing else it could be.
+	 */
+	private boolean hasVectorTable(Program program, Address base) {
+		if (!Keil8051.isLoadedCode(program, base)) {
+			return false;
+		}
+		try {
+			int opcode = program.getMemory().getByte(base) & 0xff;
+			return opcode == LJMP || opcode == SJMP || (opcode & AJMP_MASK) == AJMP_OPCODE;
+		}
+		catch (MemoryAccessException e) {
+			return false;
+		}
 	}
 
 	/**

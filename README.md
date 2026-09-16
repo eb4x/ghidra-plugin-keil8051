@@ -128,6 +128,15 @@ A slot is skipped when its three bytes are all `0x00` or all `0xff` — the two 
 unused vector carries. The vector count is an analyzer option (default 32); the classic 8051 has 5,
 but derivatives extend the table in the same 8-byte steps.
 
+**Not every 8051 image has a vector table.** A module that is called rather than reset into — the
+USB-PD payload in the MStar image begins `MOV A,#5; MOVX @DPTR,A`, mid-routine — has ordinary code
+where its vectors would be. The interrupt vectors are therefore seeded only when the reset slot
+actually holds a jump, which is what a vector table always starts with; without one, only the
+module's first byte is seeded, as a plain `entry`. Measured on that payload: the guard drops 9
+fabricated entry points named after interrupts the module does not have, at a cost of about 5% of
+the functions (637 → 606). **Seed vectors without a reset jump** turns the guard off when reach
+matters more than that.
+
 ## Build & install
 
 Requires JDK 21+ and a gitignored, project-local `gradle.properties` holding `GHIDRA_INSTALL_DIR`

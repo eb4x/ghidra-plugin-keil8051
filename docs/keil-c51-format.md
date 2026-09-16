@@ -311,3 +311,9 @@ Two findings from doing it:
   option. It also means that importing that region as a raw 64 KB slice and letting
   `Keil8051VectorAnalyzer` seed "vectors" at `+0/+3/+0xb/...` seeds addresses that are not vectors
   at all — the code it reaches from them may still be real, but the entry points are not.
+
+  Fixed: the analyzer now seeds the interrupt vectors only when the reset slot holds a jump, and
+  names a vector-less module's first byte `entry` rather than `reset`. Measured on that payload,
+  the guard drops 9 fabricated entry points at a cost of about 5% of the functions (637 → 606);
+  the **Seed vectors without a reset jump** option restores the old behaviour for anyone who wants
+  the reach. Suggested by `hp-z27k-g3` after the finding above.
