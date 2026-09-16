@@ -2,6 +2,8 @@ package ebbex.keil8051;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressOutOfBoundsException;
@@ -21,9 +23,11 @@ import ghidra.util.task.TaskMonitor;
  * @param address the first table entry
  * @param entries the table entries in case order
  * @param bound the case count the compiler's own range check proves
+ * @param caseBias what table slot 0 is the case label for — 1 when the switch value was
+ *     decremented before the range check, which is how Keil compiles a switch not starting at zero
  */
 public record KeilJumpTable(Address dispatch, Address jump, Address address, List<Entry> entries,
-		int bound) {
+		int bound, int caseBias) {
 
 	/**
 	 * One table slot: an {@code AJMP} instruction and where it goes.
@@ -45,20 +49,49 @@ public record KeilJumpTable(Address dispatch, Address jump, Address address, Lis
 	 */
 	private static final int MAX_ENTRIES = 128;
 
-	/** {@code MOV DPTR,#imm16; ADD A,ACC; JMP @A+DPTR} — the dispatch, with the table address open. */
-	private static final byte[] DISPATCH = {
-		(byte) 0x90, 0, 0, (byte) 0x25, (byte) 0xe0, (byte) 0x73
-	};
-	private static final byte[] DISPATCH_MASK = {
-		(byte) 0xff, 0, 0, (byte) 0xff, (byte) 0xff, (byte) 0xff
-	};
+	/**
+	 * The dispatch shapes, each {@code MOV DPTR,#table; ADD A,ACC; ...; JMP @A+DPTR} with the table
+	 * address masked out.
+	 *
+	 * @param pattern bytes to match
+	 * @param mask {@code 0xff} where {@code pattern} must match, {@code 0} where it is a wildcard
+	 * @param jumpOffset where {@code JMP @A+DPTR} sits within the pattern
+	 */
+	private record Dispatch(byte[] pattern, byte[] mask, int jumpOffset) {}
 
-	/** Offset of {@code JMP @A+DPTR} within the dispatch pattern. */
-	private static final int JUMP_OFFSET = 5;
+	/**
+	 * Two shapes, differing by Keil's page-carry fix-up.
+	 * <p>
+	 * {@code AJMP} entries are two bytes, so {@code ADD A,ACC} can carry out of the low byte of the
+	 * table address whenever {@code 2 * bound} could exceed {@code 0xff} from the table base. Keil
+	 * emits {@code JNC $+2; INC DPH} to cover that, and emits it on the evidence of the bound alone
+	 * — at {@code 0xbcbb} in the GL3523 L2 hub image it is dead at run time ({@code 2 * 27 = 54})
+	 * but present in the bytes. A matcher anchored on {@code ADD A,ACC} immediately followed by
+	 * {@code JMP @A+DPTR} therefore skips a real switch, which is exactly what happened.
+	 */
+	private static final List<Dispatch> DISPATCHES = List.of(
+		// MOV DPTR,#imm16; ADD A,ACC; JMP @A+DPTR
+		new Dispatch(
+			new byte[] { (byte) 0x90, 0, 0, (byte) 0x25, (byte) 0xe0, (byte) 0x73 },
+			new byte[] { (byte) 0xff, 0, 0, (byte) 0xff, (byte) 0xff, (byte) 0xff },
+			5),
+		// MOV DPTR,#imm16; ADD A,ACC; JNC $+2; INC DPH; JMP @A+DPTR
+		new Dispatch(
+			new byte[] { (byte) 0x90, 0, 0, (byte) 0x25, (byte) 0xe0, (byte) 0x50, (byte) 0x02,
+				(byte) 0x05, (byte) 0x83, (byte) 0x73 },
+			new byte[] { (byte) 0xff, 0, 0, (byte) 0xff, (byte) 0xff, (byte) 0xff, (byte) 0xff,
+				(byte) 0xff, (byte) 0xff, (byte) 0xff },
+			9));
 
 	private static final int CJNE_A_IMM = 0xb4;
 	private static final int JC = 0x40;
 	private static final int JNC = 0x50;
+
+	/**
+	 * {@code DEC A} immediately before the bound is Keil's "cases do not start at zero" idiom: the
+	 * switch value is decremented so slot {@code i} of the table is case {@code i + 1}.
+	 */
+	private static final int DEC_A = 0x14;
 
 	/**
 	 * How far back to look for the range check. The shortest real gap is
@@ -79,35 +112,56 @@ public record KeilJumpTable(Address dispatch, Address jump, Address address, Lis
 			throws CancelledException {
 
 		Memory memory = program.getMemory();
-		List<KeilJumpTable> found = new ArrayList<>();
-		Address from = memory.getMinAddress();
-		while (from != null) {
-			monitor.checkCancelled();
-			Address at = memory.findBytes(from, DISPATCH, DISPATCH_MASK, true, monitor);
-			if (at == null) {
-				break;
+		Map<Address, KeilJumpTable> found = new TreeMap<>();
+		for (Dispatch dispatch : DISPATCHES) {
+			Address from = memory.getMinAddress();
+			while (from != null) {
+				monitor.checkCancelled();
+				Address at = memory.findBytes(from, dispatch.pattern(), dispatch.mask(), true,
+					monitor);
+				if (at == null) {
+					break;
+				}
+				KeilJumpTable table = parseDispatch(memory, at, dispatch);
+				if (table != null) {
+					found.put(at, table);
+				}
+				from = at.next();
 			}
-			KeilJumpTable table = parseDispatch(memory, at);
-			if (table != null) {
-				found.add(table);
-			}
-			from = at.next();
 		}
-		return found;
+		return List.copyOf(found.values());
 	}
 
 	/** Reads the table address out of the dispatch and the case count out of the range check. */
-	private static KeilJumpTable parseDispatch(Memory memory, Address dispatch) {
+	private static KeilJumpTable parseDispatch(Memory memory, Address dispatch, Dispatch shape) {
 		try {
 			Address table = dispatch.getNewAddress(memory.getShort(dispatch.add(1)) & 0xffff);
-			int bound = readBound(memory, dispatch);
+			Address check = boundCheck(memory, dispatch);
+			if (check == null) {
+				return null;
+			}
+			int bound = memory.getByte(check.add(1)) & 0xff;
 			if (bound < 1) {
 				return null;
 			}
-			return parse(memory, dispatch, dispatch.add(JUMP_OFFSET), table, bound);
+			return parse(memory, dispatch, dispatch.add(shape.jumpOffset()), table, bound,
+				caseBias(memory, check));
 		}
 		catch (MemoryAccessException | RuntimeException e) {
 			return null;
+		}
+	}
+
+	/**
+	 * Slot {@code 0} of the table is case {@code 1} when the switch value was decremented first,
+	 * which is how Keil compiles a switch whose smallest label is not zero.
+	 */
+	private static int caseBias(Memory memory, Address boundCheck) {
+		try {
+			return (memory.getByte(boundCheck.subtract(1)) & 0xff) == DEC_A ? 1 : 0;
+		}
+		catch (MemoryAccessException | RuntimeException e) {
+			return 0;
 		}
 	}
 
@@ -117,24 +171,24 @@ public record KeilJumpTable(Address dispatch, Address jump, Address address, Lis
 	 * failure being repaired is a table walked past its end, and guessing a length would be the
 	 * same mistake again.
 	 */
-	private static int readBound(Memory memory, Address dispatch) throws MemoryAccessException {
+	private static Address boundCheck(Memory memory, Address dispatch) throws MemoryAccessException {
 		for (int back = BOUND_SEARCH_MIN; back <= BOUND_SEARCH_MAX; back++) {
 			Address at;
 			try {
 				at = dispatch.subtract(back);
 			}
 			catch (RuntimeException e) {
-				return 0;
+				return null;
 			}
 			if ((memory.getByte(at) & 0xff) != CJNE_A_IMM) {
 				continue;
 			}
 			int branch = memory.getByte(at.add(3)) & 0xff;
 			if (branch == JC || branch == JNC) {
-				return memory.getByte(at.add(1)) & 0xff;
+				return at;
 			}
 		}
-		return 0;
+		return null;
 	}
 
 	/** The addresses this switch can branch to, in case order. */
@@ -152,6 +206,12 @@ public record KeilJumpTable(Address dispatch, Address jump, Address address, Lis
 	 */
 	public static KeilJumpTable parse(Memory memory, Address dispatch, Address jump, Address address,
 			int bound) {
+		return parse(memory, dispatch, jump, address, bound, 0);
+	}
+
+	/** As {@link #parse}, with the case-label bias the dispatch's {@code DEC A} implies. */
+	public static KeilJumpTable parse(Memory memory, Address dispatch, Address jump, Address address,
+			int bound, int caseBias) {
 
 		if (bound < 1 || bound > MAX_ENTRIES) {
 			return null;
@@ -164,13 +224,13 @@ public record KeilJumpTable(Address dispatch, Address jump, Address address, Lis
 				if (target == null) {
 					return null;
 				}
-				entries.add(new Entry(index, at, target));
+				entries.add(new Entry(index + caseBias, at, target));
 			}
 		}
 		catch (MemoryAccessException | AddressOutOfBoundsException e) {
 			return null;
 		}
-		return new KeilJumpTable(dispatch, jump, address, List.copyOf(entries), bound);
+		return new KeilJumpTable(dispatch, jump, address, List.copyOf(entries), bound, caseBias);
 	}
 
 	/**

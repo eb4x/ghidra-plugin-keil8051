@@ -203,6 +203,62 @@ public class KeilJumpTableAnalyzerTest extends AbstractGenericTest {
 			symbols.getNamespace("jmp_" + self.addr("0x900c"), overrides));
 	}
 
+	/**
+	 * The GL3523 L2 hub switch at {@code 0xbcbf}, reported by `hp-z27k-g3` as missed. Two things
+	 * differ from the plain shape: {@code DEC A} before the bound, so slot 0 is case 1; and Keil's
+	 * page-carry fix-up {@code JNC $+2; INC DPH} between {@code ADD A,ACC} and {@code JMP @A+DPTR},
+	 * which broke a matcher that assumed those two were adjacent. The fix-up is dead here
+	 * (2 * 27 = 54, no carry) but present in the bytes, which is exactly why matching on the bytes
+	 * has to allow for it.
+	 */
+	@Test
+	public void recoversTheVariantWithAPageCarryFixup() throws Exception {
+		ProgramBuilder hub = new ProgramBuilder("hub2", ProgramBuilder._8051);
+		hub.createMemory("CODE", "0x8000", 0x6312);
+		// MOV A,R7 / DEC A / CJNE A,#0x1c / JC / AJMP default / MOV DPTR,#0xbcc0 / ADD A,ACC /
+		// JNC $+2 / INC DPH / JMP @A+DPTR
+		hub.setBytes("0xbcad", "ef 14 b4 1c 00 40 02 a1 4c 90 bc c0 25 e0 50 02 05 83 73");
+		hub.setBytes("0xbcc0",
+			"81 f8 81 fb a1 4c 81 fe a1 01 a1 04 a1 07 a1 0a a1 0d a1 10 a1 13 a1 16 " +
+				"a1 1c a1 22 a1 25 a1 28 a1 2b a1 2e a1 33 a1 3a a1 3d a1 4c a1 1f a1 40 " +
+				"a1 43 a1 19 a1 46 a1 49");
+		Program hubProgram = hub.getProgram();
+
+		int txId = hubProgram.startTransaction("keil ajmp tables");
+		try {
+			assertTrue("the page-carry variant must be recognised",
+				new KeilJumpTableAnalyzer().added(hubProgram, new AddressSet(), TaskMonitor.DUMMY,
+					new MessageLog()));
+		}
+		finally {
+			hubProgram.endTransaction(txId, true);
+		}
+
+		int refs = 0;
+		for (Reference ref : hubProgram.getReferenceManager()
+				.getReferencesFrom(hub.addr("0xbcbf"))) {
+			if (ref.getReferenceType().isComputed()) {
+				refs++;
+			}
+		}
+		assertEquals("CJNE A,#0x1c bounds this at 28 entries", 28, refs);
+
+		KeilJumpTable table = KeilJumpTable.findAll(hubProgram, TaskMonitor.DUMMY).get(0);
+		assertEquals(hub.addr("0xbcbf"), table.jump());
+		assertEquals(hub.addr("0xbcc0"), table.address());
+		assertEquals("table ends where the first case target begins",
+			hub.addr("0xbcf8"), table.end());
+		assertEquals("DEC A means slot 0 is case 1", 1, table.caseBias());
+		assertEquals(1, table.entries().get(0).caseValue());
+		assertEquals(28, table.entries().get(27).caseValue());
+
+		// Entries mix pages 0xbc and 0xbd; AJMP takes its page from the FOLLOWING instruction.
+		assertEquals(hub.addr("0xbcf8"), table.entries().get(0).target());
+		assertEquals("a case that jumps to the default target like any other",
+			hub.addr("0xbd4c"), table.entries().get(2).target());
+		assertEquals(hub.addr("0xbd49"), table.entries().get(27).target());
+	}
+
 	@Test
 	public void rerunIsIdempotent() throws Exception {
 		analyze();

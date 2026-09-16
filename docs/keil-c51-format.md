@@ -144,6 +144,34 @@ unrelated code relabelled. Two of the resulting decompiler errors are visible in
 - `Could not follow disassembly flow into non-existing memory at CODE:047f` — flow followed out of
   the fabricated cases and off the loaded image, which is based at `0x8000`.
 
+### Two dispatch shapes
+
+`AJMP` entries are two bytes, so `ADD A,ACC` can carry out of the low byte of the table address
+whenever `2 * bound` could exceed `0xff` from the table base. Keil covers that with a fix-up, and
+emits it on the evidence of the bound alone — so it appears even when it is dead at run time:
+
+```
+bcad  ef        MOV  A,R7
+bcae  14        DEC  A             ; cases start at 1
+bcaf  b4 1c 00  CJNE A,#0x1c,$+3   ; bound 28
+bcb2  40 02     JC   bcb6
+bcb4  a1 4c     AJMP bd4c          ; default
+bcb6  90 bc c0  MOV  DPTR,#0xbcc0
+bcb9  25 e0     ADD  A,ACC
+bcbb  50 02     JNC  bcbf          ; page-carry fix-up: dead here (2 * 27 = 54), present anyway
+bcbd  05 83     INC  DPH
+bcbf  73        JMP  @A+DPTR
+```
+
+A matcher anchored on `ADD A,ACC` immediately followed by `JMP @A+DPTR` skips this entirely, which
+is what happened to `0xbcbf` in the L2 hub image until `hp-z27k-g3` reported it. Both shapes are
+now matched. Its 28-entry table at `0xbcc0` also mixes pages `0xbc` (`81 xx`) and `0xbd` (`a1 xx`),
+which the per-entry `AJMP` decode already handled since each entry takes its page from its own
+following instruction.
+
+`DEC A` immediately before the bound is Keil's "cases do not start at zero" idiom: table slot `i`
+is case `i + 1`, and the analyzer labels them accordingly.
+
 `KeilJumpTableAnalyzer` reads the bound from the range check, verifies exactly that many `AJMP`
 slots, and lays down one `COMPUTED_JUMP` per case. A dispatch whose bound cannot be read is left
 alone: the failure being fixed is a table walked past its end, and guessing a length would be the
@@ -225,9 +253,9 @@ targets)`, and no `pcode error` in the application log at all. `vendor_req_A1_is
 decompiles to a nine-case `switch` under `if (bVar1 < 9)` instead of the 129-case listing full of
 `halt_baddata()`.
 
-All three `AJMP` dispatches in the L2 hub image are the same shape and all three are recovered:
-`0x89b6` (bound `0x0b`, 11 cases), `0xa81c` (bound `0x08`, 8 cases) and `0xbd6a` (bound `0x09`,
-9 cases). The overrides at `0xa81c` and `0xbd6a` both report `CONSUMED`; `0xa800`'s two log
+The L2 hub image has four `AJMP` dispatches: `0x89b6` (bound `0x0b`, 11 cases), `0xa81c`
+(`0x08`, 8), `0xbd6a` (`0x09`, 9) and `0xbcbf` (`0x1c`, 28 — the page-carry shape, with `DEC A` so
+its cases run 1 to 28). The overrides at `0xa81c` and `0xbd6a` both report `CONSUMED`; `0xa800`'s two log
 warnings (`pcode error at CODE:f0d2` and `at CODE:2109`) come from `0xa81c` and are gone with it.
 
 Independently confirmed by `hp-z27k-g3` on its hand-curated L2 program, running both one-shots in
