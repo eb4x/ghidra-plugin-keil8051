@@ -91,6 +91,13 @@ Verified whole, byte for byte, at both L2 hub call sites:
 | `0x8811` | `0x8814` | 10 | `0x8b2b` | `0x8836` |
 | `0xa3a5` | `0xa3a8` | 12 | `0xa43e` | `0xa3d0` |
 
+Independently confirmed by the `hp-z27k-g3` session against its own copy of the L2 hub program:
+same entry order, same ten targets and values, same default and same table end, and its
+disassembly of the helper at `0xc176` matches the decode above. The entry order is not an
+inference — the reverse reading ("value first") makes the first entry of both tables point at
+`0x2900` / `0x3c00`, below the CODE block and unmapped, which is what the parser's
+out-of-range check rejects.
+
 In both, the byte after the table is itself a case target (`0x8836` is case `0x04`; `0xa3d0` is
 case `0x08`), which is why flow resumes correctly once the targets are disassembled — there is no
 need to "resume after the terminator" as a separate step.
