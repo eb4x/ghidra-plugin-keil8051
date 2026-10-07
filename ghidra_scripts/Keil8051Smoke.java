@@ -73,7 +73,20 @@ public class Keil8051Smoke extends GhidraScript {
 		expect(actual == offset, "CODE starts at file offset 0x%x, expected 0x%x".formatted(actual, offset));
 	}
 
+	/**
+	 * The vector analyzer seeds exactly the six slots of the table, and nothing in the code after
+	 * it: a fake vector inside a switch splits the function and strands its override.
+	 */
+	private void checkEntryPoints(long base) {
+		Set<Address> expected = addrs(base, base + 0x03, base + 0x0b, base + 0x13, base + 0x1b,
+			base + 0x23);
+		Set<Address> actual = new TreeSet<>();
+		currentProgram.getSymbolTable().getExternalEntryPointIterator().forEachRemaining(actual::add);
+		expect(actual.equals(expected), "entry points %s, expected %s".formatted(actual, expected));
+	}
+
 	private void checkModule1(long base) throws Exception {
+		checkEntryPoints(base);
 		checkFunction(base + 0x00, "reset");
 		checkFunction(base + 0x03, "int_ext0");
 		checkFunction(base + 0x0b, "int_timer0");
@@ -94,6 +107,7 @@ public class Keil8051Smoke extends GhidraScript {
 	}
 
 	private void checkModule2() throws Exception {
+		checkEntryPoints(0);
 		checkFunction(0x00, "reset");
 		checkFunction(0x0b, "int_timer0");
 		// Plain AJMP shape with an LJMP default, cases 0..2.

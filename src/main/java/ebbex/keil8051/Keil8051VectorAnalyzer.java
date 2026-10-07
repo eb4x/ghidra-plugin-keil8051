@@ -37,13 +37,16 @@ import ghidra.util.task.TaskMonitor;
  * zero, which is what makes this work for an image based somewhere other than 0 (the GL3523 hub
  * firmware loads at {@code 0x8000}).
  * <p>
- * <b>What it does.</b> For each vector whose bytes look like code, it disassembles, creates a
- * function, names it, and marks it an external entry point so later analysis follows it.
+ * <b>What it does.</b> For each vector, it disassembles, creates a function, names it, and marks it
+ * an external entry point so later analysis follows it.
  * <p>
- * A slot is skipped when its bytes are all {@code 0x00} or all {@code 0xff} — the two fill patterns
- * an unused vector carries — or when it will not disassemble. That is deliberately permissive:
- * seeding a vector that turns out to be padding costs a stray function, while missing one costs the
- * whole subtree of code it leads to.
+ * <b>Most probed slots are not vectors.</b> Keil's linker packs ordinary code into the gaps between
+ * vectors and straight after the last used one, so a slot is seeded only if it holds a jump into
+ * loaded code or a {@code RETI} and the code already reached from earlier entries does not run
+ * through it (see {@link #vectorTableSeeds}). Seeding every slot that is not fill, as this once did,
+ * splits real functions at invented entry points. In the smoke sample that put a fake
+ * {@code int_vector_7} in the middle of a switch, so its jump-table override landed on the wrong
+ * function.
  * <p>
  * <b>Not every 8051 image has a vector table.</b> A module that is called rather than reset into —
  * the USB-PD payload in the MStar scaler image begins {@code MOV A,#5; MOVX @DPTR,A}, mid-routine —
@@ -90,6 +93,7 @@ public class Keil8051VectorAnalyzer extends AbstractAnalyzer {
 	private static final int SJMP = 0x80;
 	private static final int AJMP_MASK = 0x1f;
 	private static final int AJMP_OPCODE = 0x01;
+	private static final int RETI = 0x32;
 
 	/** The classic 8051 interrupt sources, in vector order, for naming. */
 	private static final String[] VECTOR_NAMES = {
@@ -134,37 +138,23 @@ public class Keil8051VectorAnalyzer extends AbstractAnalyzer {
 			return false;
 		}
 
-		boolean vectorTable = assumeVectors || hasVectorTable(program, base);
-		int probes = vectorTable ? vectorCount : 0;
-
-		List<Address> seeded = new ArrayList<>();
-		AddressSet toDisassemble = new AddressSet();
-		for (int index = -1; index < probes; index++) {
-			monitor.checkCancelled();
-			Address vector = vectorAddress(base, index);
-			if (vector == null || !looksLikeCode(program, vector)) {
-				continue;
-			}
-			seeded.add(vector);
-			toDisassemble.addRange(vector, vector);
-		}
-
+		boolean vectorTable = hasVectorTable(program, base);
+		List<Seed> seeded = vectorTable ? vectorTableSeeds(program, base, monitor)
+				: assumeVectors ? assumedSeeds(program, base, monitor)
+				: entrySeed(program, base, monitor);
 		if (seeded.isEmpty()) {
 			return false;
 		}
 
-		new DisassembleCommand(toDisassemble, null, true).applyTo(program, monitor);
-
 		SymbolTable symbols = program.getSymbolTable();
 		int created = 0;
-		for (int i = 0; i < seeded.size(); i++) {
+		for (Seed seed : seeded) {
 			monitor.checkCancelled();
-			Address vector = seeded.get(i);
-			if (program.getListing().getInstructionAt(vector) == null) {
+			if (program.getListing().getInstructionAt(seed.address()) == null) {
 				continue;
 			}
-			symbols.addExternalEntryPoint(vector);
-			nameVector(program, vector, vectorName(i - 1, vectorTable), monitor);
+			symbols.addExternalEntryPoint(seed.address());
+			nameVector(program, seed.address(), vectorName(seed.index(), vectorTable), monitor);
 			created++;
 		}
 
@@ -172,6 +162,104 @@ public class Keil8051VectorAnalyzer extends AbstractAnalyzer {
 			Msg.info(this, "8051: seeded " + created + " vector entry point(s) from " + base);
 		}
 		return created > 0;
+	}
+
+	/** A seeded entry point; {@code index} -1 is reset, 0 and up the interrupt vectors. */
+	private record Seed(int index, Address address) {}
+
+	/**
+	 * The reset vector and every interrupt slot that really is a vector.
+	 * <p>
+	 * A slot is a vector only if it holds a jump into loaded code or a {@code RETI}, and no code
+	 * already reached from an earlier entry runs through it. Both conditions are needed, measured
+	 * on the real images. Keil's linker fills the gaps between vectors with ordinary code: in the
+	 * GL3523 hubs a routine runs from {@code base+0x0e} to {@code +0x1a}, straight through the
+	 * {@code +0x13} slot, and code follows the last used vector, so most of the 32 slots probed
+	 * hold code. The gaps are not the end of the table either. The MStar scaler modules have code
+	 * at {@code 0x26}-{@code 0x4a} and then real extended vectors at {@code 0x4b}, {@code 0x53}
+	 * and {@code 0x5b}, so probing cannot stop at the first slot that is not a vector.
+	 * <p>
+	 * So each accepted entry is disassembled, following its flow, before the next slot is
+	 * judged. A slot that flow has already covered is code, not a vector. A code byte that merely
+	 * looks like a jump is caught that way, and the content test catches the rest. {@code SJMP}
+	 * is accepted at reset only: Keil emits {@code LJMP} for an interrupt, and the L1 hub has an
+	 * {@code SJMP} at {@code +0x3b} that is gap code.
+	 */
+	private List<Seed> vectorTableSeeds(Program program, Address base, TaskMonitor monitor)
+			throws CancelledException {
+		List<Seed> seeds = new ArrayList<>();
+		seeds.add(new Seed(-1, base));
+		disassemble(program, base, monitor);
+		for (int index = 0; index < vectorCount; index++) {
+			monitor.checkCancelled();
+			Address vector = vectorAddress(base, index);
+			if (vector == null || program.getListing().getInstructionContaining(vector) != null ||
+				!isVectorEntry(program, vector)) {
+				continue;
+			}
+			seeds.add(new Seed(index, vector));
+			disassemble(program, vector, monitor);
+		}
+		return seeds;
+	}
+
+	/**
+	 * With the guard off, every interrupt slot that is not fill, as before the vector-table rule:
+	 * an image without a reset jump has no table to apply it to, and the option trades truth for
+	 * reach on purpose.
+	 */
+	private List<Seed> assumedSeeds(Program program, Address base, TaskMonitor monitor)
+			throws CancelledException {
+		List<Seed> seeds = new ArrayList<>(entrySeed(program, base, monitor));
+		AddressSet toDisassemble = new AddressSet();
+		for (int index = 0; index < vectorCount; index++) {
+			monitor.checkCancelled();
+			Address vector = vectorAddress(base, index);
+			if (vector != null && looksLikeCode(program, vector)) {
+				seeds.add(new Seed(index, vector));
+				toDisassemble.add(vector);
+			}
+		}
+		new DisassembleCommand(toDisassemble, null, true).applyTo(program, monitor);
+		return seeds;
+	}
+
+	/** Without a vector table, only the module's first byte: code does start there. */
+	private List<Seed> entrySeed(Program program, Address base, TaskMonitor monitor) {
+		if (!looksLikeCode(program, base)) {
+			return List.of();
+		}
+		disassemble(program, base, monitor);
+		return List.of(new Seed(-1, base));
+	}
+
+	private static void disassemble(Program program, Address at, TaskMonitor monitor) {
+		new DisassembleCommand(at, null, true).applyTo(program, monitor);
+	}
+
+	/** {@code LJMP} or {@code AJMP} into loaded code, or a {@code RETI}. */
+	private static boolean isVectorEntry(Program program, Address vector) {
+		Memory memory = program.getMemory();
+		try {
+			int opcode = memory.getByte(vector) & 0xff;
+			if (opcode == RETI) {
+				return true;
+			}
+			if (opcode == LJMP) {
+				long target = memory.getShort(vector.add(1)) & 0xffff;
+				return Keil8051.isLoadedCode(program, vector.getNewAddress(target));
+			}
+			if ((opcode & AJMP_MASK) == AJMP_OPCODE) {
+				long next = vector.getOffset() + 2;
+				long target = (next & 0xf800) | ((opcode & 0xe0) << 3) |
+					(memory.getByte(vector.add(1)) & 0xff);
+				return Keil8051.isLoadedCode(program, vector.getNewAddress(target));
+			}
+			return false;
+		}
+		catch (MemoryAccessException | AddressOutOfBoundsException e) {
+			return false;
+		}
 	}
 
 	/**
