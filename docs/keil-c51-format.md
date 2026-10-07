@@ -321,10 +321,27 @@ with no manual work, and deleted afterwards:
 
 | program | base | vectors seeded | case helpers | tables recovered | functions |
 | --- | --- | --- | --- | --- | --- |
-| GL3523 L2 hub | `0x8000` | 10 | `?C?CCASE` @ `0xc176` | `0x8814` (10 cases), `0xa3a8` (12) | 282 |
-| GL3523 L1 hub | `0x8000` | 10 | `?C?CCASE` @ `0xbc89` | `0x8814` (10 cases), `0xa13c` (12) | 226 |
-| USB-PD module (file `0x108000`, 64 KB) | 0 | 10 | all three | none — no call sites in this module | 637 |
-| main scaler firmware (file `0x20080`, 64 KB) | 0 | 10 | none | none | 65 |
+| GL3523 L2 hub | `0x8000` | 4 | `?C?CCASE` @ `0xc176` | `0x8814` (10 cases), `0xa3a8` (12) | 287 |
+| GL3523 L1 hub | `0x8000` | 4 | `?C?CCASE` @ `0xbc89` | `0x8814` (10 cases), `0xa13c` (12) | 229 |
+| USB-PD module (file `0x108000`, 64 KB) | 0 | 1 (`entry`) | all three | none — no call sites in this module | 606 |
+| main scaler firmware (file `0x20080`, 64 KB) | 0 | 9 | none | none | 41 |
+
+These counts are from 0.4.2, which seeds only real vectors. **Earlier versions of this table were
+inflated by fake ones.** The analyzer probed 32 slots and seeded every slot that wasn't fill, but
+Keil's linker packs ordinary code into the gaps between vectors and after the last one. Measured by
+running 0.4.0 and 0.4.2 headless on the same images:
+
+- **L2 hub:** 0.4.0 seeded 21 entry points, 17 of them inside code, such as `+0x13` and `+0x23` in
+  the routine packed at `+0x0e`-`+0x1a`. It had 305 functions; 18 are gone: the 17 fakes plus one
+  reached only from them. No function appears that wasn't there before.
+- **Main scaler module:** 0.4.0 seeded 30 entry points, 21 of them inside code, mostly Keil's
+  `?C?COPY` from `0x5e`. It had 65 functions; 24 are gone: the 21 fakes plus 3 reached only from
+  them. The 9 real vectors include the core's extended ones at `0x4b`, `0x53` and `0x5b`, which come
+  after packed code at `0x26`-`0x4a`. So a gap is not the end of the table.
+
+The smoke test caught it. In its module 2, a fake vector at `0x8b`, in the middle of a switch,
+split the function. The jump-table override then landed on the fragment, and stock Ghidra rendered
+128 fabricated cases.
 
 With the `AJMP` analyzers added, a re-import of the L2 hub image gives nine references off
 `0xbd6a`, no `switchD_` symbol anywhere, an override reported `CONSUMED (9 cases -> 9 distinct
@@ -346,11 +363,11 @@ DDC/CI write frame with op `0xf6` — which that session had previously only cha
 observed USB traffic.
 
 The main scaler module contains **no** `JMP @A+DPTR` at all, so this idiom is not what limits it to
-65 functions in 64 KB. Whatever reaches the rest of that module, it is not a Keil `AJMP` switch.
+41 functions in 64 KB. Whatever reaches the rest of that module, it is not a Keil `AJMP` switch.
 
 Two results worth keeping:
 
-- The L2 hub's hand-curated copy has 253 functions after manual work; the fresh import reaches 282
+- The L2 hub's hand-curated copy has 253 functions after manual work; the fresh import reaches 287
   with none. The switch at `0x8811` is in a region auto-analysis never reaches by flow, and it is
   recovered anyway.
 - The main scaler firmware contains the inline-constant loaders, which also pop their return
@@ -413,8 +430,10 @@ at `0x8000`-`0xffff`" was wrong and has been retracted by its author. Do not bui
 `MStarModuleLoader` splits such an image into one program per module. Verified on
 `HP_Z27kG3_EIM153_15100_20220322_Service.bin`: it auto-detects exactly the two modules at
 `0x20080` and `0x30080`, names them `EIM152_020080` / `EIM152_030080` from the sBoot info block,
-gives each an `rwx` `CODE` block at `0x0000`, and each then analyses to 10 seeded vectors and 65
-functions — identical to a hand-split import, with no hand calculation.
+gives each an `rwx` `CODE` block at `0x0000`, and each then analyses to 9 seeded vectors and 41
+functions (65 before 0.4.2, which counted fake vectors; see "Verified on fresh imports"), identical
+to a hand-split import, with no hand calculation. Since 0.4.1 an explicit **Module offsets** import
+is named the same way, so the USB-PD payload comes in as `EIM152_108000`.
 
 Two findings from doing it:
 
