@@ -42,8 +42,8 @@ public class Keil8051Smoke extends GhidraScript {
 				checkFileOffset(0x100);
 				checkModule1(0x0000);
 			}
-			// Loaded by explicit offset, which names a module by its offset alone.
-			case "module_010200" -> {
+			// Loaded by explicit offset, and still named from the firmware ID.
+			case "SMOKE1_010200" -> {
 				checkFileOffset(0x10200);
 				checkModule2();
 			}

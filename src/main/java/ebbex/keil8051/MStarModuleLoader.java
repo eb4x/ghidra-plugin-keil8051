@@ -251,7 +251,7 @@ public class MStarModuleLoader extends AbstractProgramLoader {
 		for (long offset : offsets) {
 			int length = (int) Math.min(size, provider.length() - offset);
 			if (length > 0) {
-				modules.add(new MStarModule(offset, length, "module_%06x".formatted(offset)));
+				modules.add(MStarModule.at(provider, offset, length));
 			}
 		}
 		return modules;

@@ -106,6 +106,27 @@ public class MStarModuleTest extends AbstractGenericTest {
 	}
 
 	@Test
+	public void namesAModuleAtAnExplicitOffsetFromTheFirmwareIdToo() throws Exception {
+		// The USB-PD payload at 0x108000 has no vector table, so it is only ever loaded this way.
+		byte[] bytes = new byte[IMAGE_SIZE];
+		byte[] marker = "MSVC0000S3".getBytes(StandardCharsets.US_ASCII);
+		System.arraycopy(marker, 0, bytes, 0x1ffe0, marker.length);
+		byte[] id = "EIM152".getBytes(StandardCharsets.US_ASCII);
+		System.arraycopy(id, 0, bytes, 0x20078, id.length);
+
+		MStarModule module = MStarModule.at(image(bytes), 0x30080, 0x100);
+		assertEquals("EIM152_030080", module.name());
+		assertEquals(0x30080, module.offset());
+		assertEquals(0x100, module.length());
+	}
+
+	@Test
+	public void namesAnExplicitModuleByOffsetWhenTheImageHasNoMarker() throws Exception {
+		assertEquals("module_030080",
+			MStarModule.at(image(new byte[IMAGE_SIZE]), 0x30080, 0x100).name());
+	}
+
+	@Test
 	public void namesModulesByOffsetWhenTheImageHasNoMarker() throws Exception {
 		byte[] bytes = new byte[IMAGE_SIZE];
 		putVectorTable(bytes, 0x20080);

@@ -79,6 +79,14 @@ public record MStarModule(long offset, int length, String name) {
 		return List.copyOf(modules);
 	}
 
+	/**
+	 * A module at an offset the caller chose rather than one the scan found, named the same way as
+	 * a scanned one: from the image's sBoot firmware ID where there is one.
+	 */
+	public static MStarModule at(ByteProvider provider, long offset, int length) throws IOException {
+		return new MStarModule(offset, length, name(readFirmwareId(provider), offset));
+	}
+
 	/** True when the bytes at {@code offset} look like the start of an 8051 image. */
 	private static boolean isModuleStart(ByteProvider provider, long offset) throws IOException {
 		if ((provider.readByte(offset) & 0xff) != LJMP) {
