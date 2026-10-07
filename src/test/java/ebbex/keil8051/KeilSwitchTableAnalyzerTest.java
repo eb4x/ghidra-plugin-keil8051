@@ -106,6 +106,9 @@ public class KeilSwitchTableAnalyzerTest extends AbstractGenericTest {
 	@Test
 	public void recoversASiteFlowAlreadyReached() throws Exception {
 		builder.disassemble("0x8811", 3);
+		// ProgramBuilder.disassemble runs auto-analysis, which would include this analyzer if it
+		// were registered there; then the count below would measure nothing.
+		assertEquals("precondition: disassembling alone recovers nothing", 0, countJumpRefs());
 
 		assertTrue(analyze());
 		assertEquals(10, countJumpRefs());

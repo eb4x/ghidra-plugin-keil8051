@@ -15,6 +15,7 @@ import ghidra.program.database.ProgramBuilder;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.listing.CommentType;
+import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.RefType;
 import ghidra.program.model.symbol.Reference;
@@ -173,6 +174,11 @@ public class KeilJumpTableAnalyzerTest extends AbstractGenericTest {
 		try {
 			new ghidra.app.cmd.function.CreateFunctionCmd("dispatch", b.addr(entry), null,
 				SourceType.ANALYSIS).applyTo(p, TaskMonitor.DUMMY);
+			// ProgramBuilder.disassemble runs auto-analysis: the override pass under test must not
+			// already have run there.
+			Function function = p.getFunctionManager().getFunctionAt(b.addr(entry));
+			assertNull("precondition: no override before the pass runs",
+				p.getSymbolTable().getNamespace("override", function));
 			new KeilSwitchOverrideAnalyzer().added(p, new AddressSet(), TaskMonitor.DUMMY,
 				new MessageLog());
 		}
