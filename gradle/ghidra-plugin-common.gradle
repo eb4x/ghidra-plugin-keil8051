@@ -79,6 +79,12 @@ dependencies {
 	testImplementation 'junit:junit:4.13.2'
 }
 
+tasks.named('test') {
+	// As in Ghidra's own test.gradle: the Gradle test worker installs a serial filter before
+	// Ghidra's application initialises, which then fails ("Cannot replace filter factory").
+	jvmArgs '-Djdk.serialFilterFactory=ghidra.framework.remote.GhidraSerialFilterFactory'
+}
+
 // ------------------------------------------------------------------------------ packaging --
 
 // buildExtension zips the whole project directory minus an exclude list. These are kept out
