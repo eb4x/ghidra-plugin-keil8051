@@ -29,3 +29,9 @@ ghidraHeadless('smokeTestBased') {
 }
 
 tasks.named('verify') { dependsOn 'smokeTest', 'smokeTestModule2', 'smokeTestBased' }
+
+// Local only, never in verify: needs SDCC, and CI tests the committed bytes.
+tasks.register('generateSmokeSample', Exec) {
+	description = 'Rebuild the committed smoke samples from their assembly source (needs SDCC)'
+	commandLine file('src/test/smoke/build.sh')
+}
