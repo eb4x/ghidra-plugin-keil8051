@@ -1,2 +1,31 @@
 // Keil8051: the shared ghidra-plugin-* build, plus what is this plugin's own.
 apply from: 'gradle/ghidra-plugin-common.gradle'
+
+// Smoke tests on the committed samples in src/test/smoke/ (rebuilt by its build.sh). Headless
+// analyzes only the primary program of a multi-program import, so each module of the MStar-style
+// image gets its own run.
+ghidraHeadless('smokeTest') {
+	description = 'Module 1 of the MStar-style sample: loader scan, vectors, both AJMP shapes, ?C?CCASE'
+	importFile = file('src/test/smoke/keil8051-smoke.bin')
+	postScript 'Keil8051Smoke.java'
+	requiredLine = 'SMOKE OK'
+}
+
+ghidraHeadless('smokeTestModule2') {
+	description = 'Module 2 of the MStar-style sample, loaded by explicit offset'
+	importFile = file('src/test/smoke/keil8051-smoke.bin')
+	args '-loader', 'MStarModuleLoader', '-loader-moduleOffsets', '0x10200'
+	postScript 'Keil8051Smoke.java'
+	requiredLine = 'SMOKE OK'
+}
+
+ghidraHeadless('smokeTestBased') {
+	description = 'Module 1 as a raw image based at 0x8000, the GL3523 hub case'
+	importFile = file('src/test/smoke/keil8051-smoke-based.bin')
+	processor = '8051:BE:16:default'
+	args '-loader', 'BinaryLoader', '-loader-baseAddr', '0x8000'
+	postScript 'Keil8051Smoke.java'
+	requiredLine = 'SMOKE OK'
+}
+
+tasks.named('verify') { dependsOn 'smokeTest', 'smokeTestModule2', 'smokeTestBased' }
