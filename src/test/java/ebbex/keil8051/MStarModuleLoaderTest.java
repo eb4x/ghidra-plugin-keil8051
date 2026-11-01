@@ -37,6 +37,21 @@ public class MStarModuleLoaderTest extends AbstractGenericTest {
 		}
 	}
 
+	/**
+	 * {@code ProgramLoader} sets each value from its command-line string through
+	 * {@link Option#parseAndSetValueByType}. Since 12.2 a plain {@link Option} refuses every value
+	 * there, so the import fails; only the typed options built by {@code Option.newString} and
+	 * friends can parse.
+	 */
+	@Test
+	public void everyOptionParsesItsCommandLineValue() {
+		for (Option option : options()) {
+			String text = option.getValueClass() == Integer.class ? "0x8000" : "0x10200";
+			assertTrue("option '" + option.getName() + "' cannot parse \"" + text + "\"",
+				option.parseAndSetValueByType(text, null));
+		}
+	}
+
 	@Test
 	public void offsetsDefaultToTheScanAndSizeToAWholeCodeSpace() {
 		List<Option> options = options();
@@ -55,8 +70,10 @@ public class MStarModuleLoaderTest extends AbstractGenericTest {
 	@Test
 	public void rejectsAMalformedOffsetListRatherThanImportingNothing() {
 		MStarModuleLoader loader = new MStarModuleLoader();
-		List<Option> bad = List.of(new Option("Module offsets", "0x20080,banana", String.class,
-			"-loader-moduleOffsets"));
+		List<Option> bad = List.of(Option.newString("Module offsets")
+				.value("0x20080,banana")
+				.commandLineArgument("-loader-moduleOffsets")
+				.build());
 
 		assertNotNull("a typo must be reported, not silently ignored",
 			loader.validateOptions(null, null, bad, null));
@@ -65,8 +82,10 @@ public class MStarModuleLoaderTest extends AbstractGenericTest {
 	@Test
 	public void rejectsAModuleSizeLargerThanTheCodeSpace() {
 		MStarModuleLoader loader = new MStarModuleLoader();
-		List<Option> bad = List.of(new Option("Module size", 0x20000, Integer.class,
-			"-loader-moduleSize"));
+		List<Option> bad = List.of(Option.newInteger("Module size")
+				.value(0x20000)
+				.commandLineArgument("-loader-moduleSize")
+				.build());
 
 		assertNotNull(loader.validateOptions(null, null, bad, null));
 	}

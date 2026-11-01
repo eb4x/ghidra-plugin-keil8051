@@ -120,8 +120,11 @@ public class MStarModuleLoader extends AbstractProgramLoader {
 			DomainObject domainObject, boolean loadIntoProgram, boolean isFsrl) {
 
 		return List.of(
-			new Option(OPTION_OFFSETS, "", String.class, ARG_OFFSETS),
-			new Option(OPTION_SIZE, MStarModule.MAX_MODULE_SIZE, Integer.class, ARG_SIZE));
+			Option.newString(OPTION_OFFSETS).value("").commandLineArgument(ARG_OFFSETS).build(),
+			Option.newInteger(OPTION_SIZE)
+					.value(MStarModule.MAX_MODULE_SIZE)
+					.commandLineArgument(ARG_SIZE)
+					.build());
 	}
 
 	@Override
@@ -228,10 +231,18 @@ public class MStarModuleLoader extends AbstractProgramLoader {
 		return program;
 	}
 
-	/** The explicit offsets if the user gave any, otherwise whatever the scan found. */
+	/**
+	 * The explicit offsets if the user gave any, otherwise whatever the scan found.
+	 * <p>
+	 * {@code ProgramLoader} still calls the loader with {@code null} options after failing to
+	 * apply a command-line value, so that is reported here instead of as an NPE.
+	 */
 	private List<MStarModule> modulesToLoad(ByteProvider provider, ImporterSettings settings)
-			throws IOException {
+			throws IOException, LoadException {
 
+		if (settings.options() == null) {
+			throw new LoadException("Loader options could not be applied; see the log");
+		}
 		int size = MStarModule.MAX_MODULE_SIZE;
 		List<Long> offsets = null;
 		for (Option option : settings.options()) {
